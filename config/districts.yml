@@ -1,0 +1,64 @@
+# Sandbox districts this engine is permitted to drift.
+#
+# Adding a district is a config change, never a code change (project brief §6).
+#
+# SAFETY: sftp.clever.com is a shared host, so the hostname proves nothing about
+# whether a target is a sandbox. The allowlist below is keyed on SFTP *username*,
+# and the engine hard-fails if the resolved username is not listed here. Do not
+# add an entry unless you have confirmed the account belongs to a sandbox /
+# developer district.
+#
+# Credentials are never stored here. Each district names the env vars holding
+# them; populate those in .env (gitignored). See .env.example.
+
+districts:
+  - id: steadfast-backpack-8880
+    label: "Tulsa Replica Sandbox"
+    enabled: true
+
+    sftp:
+      host: sftp.clever.com
+      port: 22
+      username: steadfast-backpack-8880
+      # Name of the env var holding the password. Not the password itself.
+      password_env: SFTP_PASSWORD_STEADFAST_BACKPACK_8880
+      # Directory on the remote to write the CSV stack into.
+      remote_dir: "/"
+
+    # Secondary safety fingerprint: a substring that must appear in the
+    # district's own data before the engine will write anything. Guards against
+    # an allowlisted credential being repointed at real roster data. Must look
+    # like a real domain fragment (contain a ".", be reasonably long) AND
+    # contain a recognised sandbox marker (see safety.SANDBOX_FINGERPRINT_MARKERS)
+    # -- a generic value like "@" is rejected at config load time, not just
+    # accepted as "present in the data" (that used to be the whole check).
+    data_fingerprint: "tulsaschools-replica.org"
+
+    # NOT YET VERIFIED. Secure Sync + district-app token eventing has NOT been
+    # confirmed active for this district (project brief §9). Do not flip this
+    # to true until that is explicitly confirmed in the Clever dashboard --
+    # see docs/RUNBOOK.md's "Pre-go-live checklist". Leaving this false is the
+    # safe default; the engine still runs with it false (it's a warning, not a
+    # gate), but a partner will see nothing on the Events API until this is
+    # actually turned on and confirmed, however correct the CSV edits are.
+    eventing_verified: false
+
+    # District's own local timezone. Cadence (which weekday bucket runs
+    # "today") is resolved in THIS timezone, not the host machine's or UTC's --
+    # otherwise a scheduled run on a UTC host near a day boundary (e.g. Friday
+    # evening in Tulsa is already Saturday in UTC) would silently skip a whole
+    # cadence bucket. See runner.resolve_run_date.
+    timezone: "America/Chicago"
+
+    # Per-district email domains and phone area codes used when generating
+    # realistic new staff/guardian/teacher/student records (project brief §6:
+    # adding a district should be a config-only change, never a code change).
+    # These default to the same Tulsa values if omitted; listed explicitly
+    # here as the template for adding a second district with different values.
+    staff_email_domain: "tulsaschools-replica.org"
+    student_email_domain: "students.tulsaschools-replica.org"
+    area_codes:
+      - "918"
+      - "539"
+      - "405"
+      - "580"

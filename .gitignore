@@ -1,0 +1,27 @@
+# Secrets -- never commit
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa*
+
+# Working state: the live CSV stack and its history are district data, not code.
+state/
+logs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+build/
+dist/
+
+# OS
+.DS_Store
+Thumbs.db

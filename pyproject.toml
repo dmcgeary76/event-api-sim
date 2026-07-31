@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "clever-sandbox-drift-engine"
+version = "0.1.0"
+description = "Scheduled data drift engine that generates Clever Events API activity in sandbox districts"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "David McGeary", email = "david.mcgeary@clever.com" }]
+
+dependencies = [
+    "paramiko>=3.4",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+ai = ["anthropic>=0.40"]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[project.scripts]
+drift-engine = "drift_engine.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

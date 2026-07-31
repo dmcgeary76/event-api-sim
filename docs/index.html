@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Clever Sandbox Events API Data Drift Engine — Project Overview</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --panel: #f6f7f9;
+    --panel-border: #e2e5ea;
+    --ink: #1c2129;
+    --muted: #5b6270;
+    --accent: #2153c9;
+    --accent-dark: #163d94;
+    --green: #1a7f4b;
+    --amber: #9a6400;
+    --red: #b3261e;
+    --border: #dfe2e8;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    line-height: 1.6;
+  }
+  a { color: var(--accent); }
+  a:hover { color: var(--accent-dark); }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 0 1.5rem 4rem; }
+
+  header.hero {
+    border-bottom: 1px solid var(--border);
+    padding: 2.75rem 1.5rem 2.25rem;
+  }
+  header.hero .wrap { padding: 0 1.5rem; }
+  header.hero h1 { margin: 0 0 .5rem; font-size: 1.9rem; letter-spacing: -0.01em; }
+  header.hero p.tagline { margin: 0; max-width: 640px; font-size: 1.05rem; color: var(--muted); }
+  .tagchips { margin-top: 1.1rem; display: flex; gap: .5rem; flex-wrap: wrap; }
+  .tagchip {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 999px;
+    padding: .2rem .75rem;
+    font-size: .8rem;
+    font-weight: 600;
+    color: var(--muted);
+  }
+  .repo-link { margin-top: 1.25rem; font-size: .92rem; }
+
+  section { margin-top: 2.5rem; }
+  h2 { font-size: 1.3rem; border-bottom: 1px solid var(--border); padding-bottom: .45rem; margin-bottom: 1rem; }
+  h3 { font-size: 1.02rem; margin-bottom: .35rem; }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    padding: 1.15rem 1.35rem;
+  }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  @media (max-width: 640px) { .grid { grid-template-columns: 1fr; } }
+  .muted { color: var(--muted); }
+  code {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    padding: .1rem .35rem;
+    border-radius: 5px;
+    font-size: .88em;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  pre {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    padding: 1rem;
+    overflow-x: auto;
+    font-size: .85rem;
+  }
+  pre code { background: none; border: none; padding: 0; }
+
+  table { width: 100%; border-collapse: collapse; margin-top: .25rem; font-size: .92rem; }
+  th, td { text-align: left; padding: .55rem .65rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: .76rem; text-transform: uppercase; letter-spacing: .03em; }
+  tr:last-child td { border-bottom: none; }
+
+  .pill { display: inline-block; padding: .1rem .55rem; border-radius: 999px; font-size: .74rem; font-weight: 700; }
+  .p-green { background: rgba(26,127,75,.1); color: var(--green); }
+  .p-amber { background: rgba(154,100,0,.1); color: var(--amber); }
+  .p-blue { background: rgba(33,83,201,.1); color: var(--accent); }
+  .p-red { background: rgba(179,38,30,.1); color: var(--red); }
+
+  .status-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: .9rem; }
+  @media (max-width: 640px) { .status-grid { grid-template-columns: 1fr; } }
+  .status-item { display: flex; justify-content: space-between; gap: 1rem; padding: .5rem 0; border-bottom: 1px solid var(--border); font-size: .93rem; }
+  .status-item:last-child { border-bottom: none; }
+  .status-label { color: var(--muted); }
+
+  ul.plain { margin: .3rem 0 0; padding-left: 1.2rem; }
+  ul.plain li { margin-bottom: .3rem; }
+
+  /* Changelog */
+  .timeline { border-left: 2px solid var(--border); margin-left: .4rem; padding-left: 1.2rem; }
+  .entry { position: relative; margin-bottom: 1.6rem; }
+  .entry::before {
+    content: ""; position: absolute; left: -1.56rem; top: .45rem;
+    width: 10px; height: 10px; border-radius: 50%; background: var(--accent);
+  }
+  .entry time { font-weight: 700; color: var(--accent); font-size: .92rem; }
+  .entry h3 { display: inline; margin-left: .4rem; font-size: 1rem; }
+  .entry ul { margin: .5rem 0 0; padding-left: 1.1rem; }
+  .entry li { margin-bottom: .35rem; font-size: .93rem; }
+  footer { margin-top: 3rem; padding-top: 1.5rem; border-top: 1px solid var(--border); color: var(--muted); font-size: .85rem; }
+</style>
+</head>
+<body>
+  <header class="hero">
+    <div class="wrap">
+      <h1>Clever Sandbox Events API Data Drift Engine</h1>
+      <p class="tagline">
+        Scheduled, semi-autonomous CSV drift for Clever sandbox districts —
+        so application partners have a live Events API stream to build
+        against instead of a static roster.
+      </p>
+      <div class="tagchips">
+        <span class="tagchip">Sandbox-only, hard-enforced</span>
+        <span class="tagchip">Fixed weekly cadence</span>
+        <span class="tagchip">CSV-over-SFTP</span>
+        <span class="tagchip">10% guardrail</span>
+        <span class="tagchip">v0.1.0</span>
+      </div>
+      <p class="repo-link">
+        <a href="https://github.com/dmcgeary76/event-api-sim">github.com/dmcgeary76/event-api-sim</a>
+      </p>
+    </div>
+  </header>
+
+  <div class="wrap">
+
+    <section>
+      <h2>What this is, and why</h2>
+      <div class="card">
+        <p>
+          Clever sandbox districts are set up for application partners to
+          test workflows built on Clever's Events API — but the roster data
+          is static once loaded, so there's no ongoing stream of
+          <code>created</code> / <code>updated</code> / <code>deleted</code>
+          events for a partner to actually observe. This engine keeps a
+          working copy of one sandbox district's CSV roster stack, makes a
+          small, bounded set of realistic edits on a fixed weekly pattern,
+          and re-syncs it over the district's existing SFTP pipeline.
+          Clever's own ingestion diffs the new export against the last one
+          and emits the corresponding Events API records — the engine never
+          calls Clever's API directly.
+        </p>
+        <p class="muted">
+          It deliberately does not have a per-district volume knob or a
+          per-partner change profile: the same cadence and magnitude apply
+          to every configured sandbox district, because partners are told to
+          expect activity on a known, predictable schedule.
+        </p>
+      </div>
+    </section>
+
+    <section>
+      <h2>The fixed weekly cadence</h2>
+      <table>
+        <thead>
+          <tr><th>Day</th><th>Bucket(s)</th><th>What happens</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Monday</td><td>small_daily</td><td>A handful of minor field edits — contact email/phone tweaks, student middle-name/email edits.</td></tr>
+          <tr><td>Tuesday</td><td>small_daily + big_student</td><td>Small daily, plus ~4 students moved between sections, a few new guardian contacts, and a couple of contact removals.</td></tr>
+          <tr><td>Wednesday</td><td>small_daily</td><td>Small daily only.</td></tr>
+          <tr><td>Thursday</td><td>small_daily + big_student</td><td>Same shape as Tuesday.</td></tr>
+          <tr><td>Friday</td><td>small_daily + big_teacher</td><td>Small daily, plus co-teacher swaps, a primary-teacher reassignment, and one brand-new teacher added.</td></tr>
+          <tr><td>Saturday / Sunday</td><td>—</td><td>Skipped entirely. No drift runs on weekends.</td></tr>
+        </tbody>
+      </table>
+      <p class="muted" style="margin-top:.8rem;">
+        Big buckets stack on top of the small daily bucket — they never
+        replace it. Magnitudes are hard-coded constants in
+        <code>cadence.py</code>, not configuration.
+      </p>
+    </section>
+
+    <section>
+      <h2>Event types produced</h2>
+      <table>
+        <thead>
+          <tr><th>Event</th><th>Produced by</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>contacts.created</code></td><td>Small daily / big-student guardian additions, and staged seed runs</td></tr>
+          <tr><td><code>contacts.updated</code></td><td>Small daily contact field edits (email, phone, phone type)</td></tr>
+          <tr><td><code>contacts.deleted</code></td><td>Big-student guardian removals (never orphans a student's last contact)</td></tr>
+          <tr><td><code>sections.updated</code></td><td>Big-student enrollment moves; big-teacher co-teacher/primary-teacher changes</td></tr>
+          <tr><td><code>users.updated</code></td><td>Small daily student field edits (middle name, student email)</td></tr>
+          <tr><td><code>teachers.created</code></td><td>Big-teacher new-teacher additions (Friday)</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Safety model</h2>
+      <div class="grid">
+        <div class="card">
+          <h3>Username allowlist, not hostname</h3>
+          <p class="muted">
+            <code>sftp.clever.com</code> is shared infrastructure across many
+            districts, so the hostname proves nothing about whether a target
+            is a sandbox. The SFTP <strong>username</strong> identifies the
+            district, and the engine hard-fails if the resolved username
+            isn't listed in <code>config/districts.yml</code>.
+          </p>
+        </div>
+        <div class="card">
+          <h3>Data fingerprint, strength-checked + scale sanity</h3>
+          <p class="muted">
+            The loaded stack must contain a configured substring (e.g.
+            <code>tulsaschools-replica.org</code>) in its own data — and the
+            fingerprint itself must be &ge;8 characters, contain a
+            <code>.</code>, and contain a recognised sandbox marker
+            (<code>replica</code>/<code>sandbox</code>/<code>dev</code>/etc.)
+            before it's trusted as a check at all. Record counts must also
+            stay within 25% of a recorded baseline, checked every run.
+          </p>
+        </div>
+        <div class="card">
+          <h3>10% / 2% deletion guardrail</h3>
+          <p class="muted">
+            Clever's real 10% pause-for-review threshold is enforced as a
+            hard block before anything is written. This engine's own
+            stricter 2% ceiling is enforced as a warning. Matched enrollment
+            moves are netted out of the count; unexplained row loss versus
+            the last real push (e.g. a truncated export) is caught.
+          </p>
+        </div>
+        <div class="card">
+          <h3>Dry-run by default</h3>
+          <p class="muted">
+            <code>run</code> and <code>seed</code> never open an SFTP
+            connection without an explicit <code>--live</code> flag — no
+            configuration path changes that default. Dry-run output is
+            pruned to the 5 most recent directories per district.
+          </p>
+        </div>
+        <div class="card">
+          <h3>One run per district at a time</h3>
+          <p class="muted">
+            An exclusive file lock on <code>state/&lt;district&gt;/.lock</code>
+            is held for the whole of a run; a second overlapping run exits
+            immediately with code 3 instead of racing the first and
+            potentially minting colliding IDs for two different students.
+          </p>
+        </div>
+        <div class="card">
+          <h3>Timezone-aware cadence</h3>
+          <p class="muted">
+            Each district's own <code>timezone</code> (default
+            <code>America/Chicago</code>) decides which weekday it is for
+            cadence purposes — never the host machine's or UTC's — so a
+            run near a day boundary can't silently skip a whole day's bucket.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Current status</h2>
+      <div class="card">
+        <div class="status-grid">
+          <div class="status-item"><span class="status-label">Version</span><span><span class="pill p-blue">v0.1.0</span></span></div>
+          <div class="status-item"><span class="status-label">Test suite</span><span><span class="pill p-green">220 passed</span> · 2 skipped (paramiko host-key tests, no PyPI in build sandbox)</span></div>
+          <div class="status-item"><span class="status-label">Dry-run verification</span><span>Verified against the real sandbox stack — 69 schools, 33,621 students, 1,866 teachers, 280 staff, 4,504 sections, 104,031 enrollments</span></div>
+          <div class="status-item"><span class="status-label">Simulated week (seed 42)</span><span>~58 changes across Mon–Fri; a 4-week run produced all six event types, worst deletion ratio ~0% against the 10% pause threshold</span></div>
+          <div class="status-item"><span class="status-label">Pending: eventing verification</span><span><span class="pill p-amber">Open</span> — Secure Sync / district-app token eventing not yet confirmed active for the target district (brief §9); <code>eventing_verified: false</code></span></div>
+          <div class="status-item"><span class="status-label">Pending: staged contacts seeding</span><span><span class="pill p-amber">Open</span> — 33,621 students with 0 contacts; staged plan is ~4,000 students/run over ~9 runs</span></div>
+          <div class="status-item"><span class="status-label">Open question: column-addition burst</span><span><span class="pill p-amber">Unconfirmed</span> — does Clever emit events for a column going absent&rarr;empty on the first live push? Biggest unknown in the project; confirm with Clever first</span></div>
+          <div class="status-item"><span class="status-label">Known limitation: teacher growth</span><span><span class="pill p-amber">Deferred</span> — +1 teacher/week with no attrition; breaches the 25% scale-sanity ceiling in ~7 years; needs a teacher-removal event type</span></div>
+          <div class="status-item"><span class="status-label">Untested: real paramiko transport</span><span><span class="pill p-amber">Code-reviewed only</span> — not installable in this build environment; watch the first live push closely</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Using the tool</h2>
+      <div class="card">
+        <h3>Run locally</h3>
+        <pre><code>python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+cp .env.example .env   # fill in the SFTP password
+
+drift-engine schedule
+drift-engine run          # dry run — no SFTP connection at all
+drift-engine run --live   # push for real</code></pre>
+        <p class="muted">
+          Full details in the
+          <a href="https://github.com/dmcgeary76/event-api-sim#readme">repository README</a>,
+          the CSV contract in <a href="https://github.com/dmcgeary76/event-api-sim/blob/main/docs/SCHEMA.md">SCHEMA.md</a>,
+          and operational guidance in <a href="https://github.com/dmcgeary76/event-api-sim/blob/main/docs/RUNBOOK.md">RUNBOOK.md</a>.
+        </p>
+      </div>
+    </section>
+
+    <section>
+      <h2>Changelog</h2>
+      <p class="muted">Mirrors <code>CHANGELOG.md</code>. Newest first.</p>
+      <div class="timeline">
+        <div class="entry">
+          <time>2026-07-30</time>
+          <h3>— v0.1.0: Initial release</h3>
+          <ul>
+            <li><strong>Core engine:</strong> schema, models, safety, config, csvstack, cadence, selection, content, seed, guardrail, sftp_push, audit, runner, and cli modules, implementing the full per-run flow from the project brief.</li>
+            <li><strong>Fixed weekly cadence:</strong> small daily edits every weekday; big student changes Tue/Thu; big teacher changes Friday; weekends skipped — magnitudes hard-coded, not configurable per district.</li>
+            <li><strong>Six event categories:</strong> contacts.created/updated/deleted, sections.updated, users.updated, and teachers.created (added beyond the brief's original five for the Friday new-teacher sub-bucket).</li>
+            <li><strong>Safety model:</strong> host + SFTP username allowlist (not hostname), a strength-validated data fingerprint, scale sanity, and an advisory production-marker tripwire — none of which are ever caught or downgraded, and a <code>SafetyViolation</code> is always audited before it propagates.</li>
+            <li><strong>Concurrency:</strong> an exclusive per-district file lock prevents two overlapping runs from minting colliding IDs and corrupting each other's edits.</li>
+            <li><strong>Timezone-aware cadence:</strong> each district's own configured timezone (default America/Chicago) decides which weekday it is, not the host machine's or UTC's.</li>
+            <li><strong>Guardrail:</strong> Clever's real 10% deletion pause threshold enforced as a hard block; this engine's own 2% ceiling enforced as a warning; matched enrollment moves netted out; unexplained row loss versus the last real push detected.</li>
+            <li><strong>CSV integrity:</strong> a missing required column is now a hard load error, not a silent blank backfill; saves are all-or-nothing across the whole stack; pushes assert stack completeness before uploading.</li>
+            <li><strong>Content generation fix:</strong> generated field "updates" (email, phone, etc.) are now re-rolled until they actually differ from the current value — previously ~62% of predicted contacts.updated events over 26 simulated weeks were silent no-ops.</li>
+            <li><strong>Audit layer:</strong> JSON, Markdown, and history.jsonl reports per run, with scoped credential redaction, a preflight check that logs/ is writable before any work happens, and dry-run output capped at the 5 most recent directories per district.</li>
+            <li><strong>Three schema additions:</strong> a Middle name column on students.csv, a Teacher 2 id column on sections.csv, and the entire contacts.csv file — all spec-optional, added because the real export had no mutable surface for three of the six event categories required.</li>
+            <li><strong>Known limitations, documented not hidden:</strong> teacher population has no attrition (breaches scale-sanity in ~7 years); whether Clever emits events for a column going absent&rarr;empty on first sync is unconfirmed; <code>eventing_verified</code> is still false; real paramiko transport is code-reviewed but never executed in this build environment.</li>
+            <li><strong>Docs:</strong> README, SCHEMA.md, RUNBOOK.md, this changelog, and this project page.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <footer>
+      Clever Sandbox Events API Data Drift Engine · v0.1.0 ·
+      <a href="https://github.com/dmcgeary76/event-api-sim">github.com/dmcgeary76/event-api-sim</a>
+    </footer>
+  </div>
+</body>
+</html>
