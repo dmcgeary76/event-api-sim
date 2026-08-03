@@ -225,7 +225,7 @@ def test_run_guardrail_blocked_exits_one(tmp_path, monkeypatch):
     )
 
     def _fake_select(stack, plan, content, *, rng):
-        from drift_engine.models import Bucket, Change, EventType, Operation
+        from drift_engine.models import Bucket, Change, EventSubject, EventType, Operation
 
         contact = stack.contacts()[0]
         return [
@@ -234,7 +234,8 @@ def test_run_guardrail_blocked_exits_one(tmp_path, monkeypatch):
                 operation=Operation.DELETE,
                 key={"Contact id": contact["Contact id"]},
                 bucket=Bucket.SMALL_DAILY,
-                expected_event=EventType.CONTACTS_DELETED,
+                expected_event=EventType.USERS_DELETED,
+                event_subject=EventSubject.CONTACT,
                 before=dict(contact),
                 note="forced guardrail violation for exit-code test",
             )

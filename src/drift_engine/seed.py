@@ -2,12 +2,21 @@
 
 David's sandbox has no ``contacts.csv`` at all -- it is an engine-added file
 (``schema.CONTACTS.engine_added``) that simply doesn't exist until this
-module (or a drift run) creates it. Three of the five event categories in the
-project brief (§3: ``contacts.created``, ``contacts.updated``,
-``contacts.deleted``) depend on students having *some* baseline set of
-contacts to edit or remove -- the small-daily and big-student buckets in
-``selection.py`` already assume that, and simply produce zero contact-related
-changes for a student with none.
+module (or a drift run) creates it. The contact lifecycle this module seeds
+-- a guardian created, later edited, later removed -- depends on students
+having *some* baseline set of contacts to edit or remove; the small-daily and
+big-student buckets in ``selection.py`` already assume that, and simply
+produce zero contact-related changes for a student with none.
+
+NOTE: the project brief (§3) called these ``contacts.created`` /
+``contacts.updated`` / ``contacts.deleted`` as if they were their own event
+types. They are not -- on Clever's real Events API (v3.x), a contact is a
+``users`` object, so every contact created here is expected to surface as
+``users.created`` with a Contacts role, not a distinct ``contacts.created``
+event. See ``models.EventType`` for the full correction and source docs.
+This docstring's language below ("contacts.created events") describes the
+*volume characteristics* of a seeding burst, which are unaffected by this
+correction -- only the wire event name is.
 
 David's decision, verbatim: "Seed it, then drift it" -- generate a baseline
 set of guardian contacts once, push that baseline, and let the normal weekly
@@ -18,7 +27,7 @@ CRITICAL: DO NOT SEED THE WHOLE DISTRICT IN ONE RUN.
 --------------------------------------------------------------------------
 The real sandbox stack has 33,620 students. At ~1.5 guardians/student (the
 weighted 1-2 split this module uses), a single unbounded seeding pass creates
-roughly **50,000 ``contacts.created`` events in one sync**. That is an
+roughly **50,000 ``users.created`` (Contacts) events in one sync**. That is an
 enormous, unrepresentative first-sync burst for an application partner to
 receive -- nothing like the small, steady drift cadence (brief §4) this whole
 engine exists to produce, and likely to look like an outage or a bulk import
@@ -50,7 +59,7 @@ import random
 
 from . import schema
 from .csvstack import CsvStack
-from .models import Bucket, Change, EventType, Operation
+from .models import Bucket, Change, EventSubject, EventType, Operation
 
 __all__ = ["seed_contacts", "estimate_seed_volume"]
 
@@ -165,7 +174,7 @@ def estimate_seed_volume(
         "recommended_run_count": run_count,
         "note": (
             f"Seeding all {n} students in one pass would emit roughly "
-            f"{expected} contacts.created events in a single sync "
+            f"{expected} users.created (Contacts) events in a single sync "
             f"(between {n * low} and {n * high} depending on the 1-2 "
             f"guardian split) -- an enormous, unrepresentative burst compared "
             f"to the normal drift cadence. Recommend staging via `limit` at "
@@ -274,7 +283,8 @@ def seed_contacts(
                     operation=Operation.CREATE,
                     key={"Contact id": contact_id},
                     bucket=Bucket.BIG_STUDENT,
-                    expected_event=EventType.CONTACTS_CREATED,
+                    expected_event=EventType.USERS_CREATED,
+                    event_subject=EventSubject.CONTACT,
                     after={
                         "School id": school_id,
                         "Student id": student_id,

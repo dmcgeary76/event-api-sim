@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING
 
 from . import schema
 from .csvstack import CsvStack
-from .models import Bucket, Change, EventType, Operation, RunPlan
+from .models import Bucket, Change, EventSubject, EventType, Operation, RunPlan
 
 if TYPE_CHECKING:
     from .content import ContentGenerator
@@ -229,7 +229,8 @@ def _small_daily(
                     operation=Operation.UPDATE,
                     key={"Contact id": contact["Contact id"]},
                     bucket=Bucket.SMALL_DAILY,
-                    expected_event=EventType.CONTACTS_UPDATED,
+                    expected_event=EventType.USERS_UPDATED,
+                    event_subject=EventSubject.CONTACT,
                     before={field: before_value},
                     after={field: new_value},
                     note=(
@@ -279,6 +280,7 @@ def _small_daily(
                 key={"Student id": student["Student id"]},
                 bucket=Bucket.SMALL_DAILY,
                 expected_event=EventType.USERS_UPDATED,
+                event_subject=EventSubject.STUDENT,
                 before={field: before_value},
                 after={field: new_value},
                 note=(
@@ -377,6 +379,7 @@ def _big_student(
                 key={"Section id": old_section_id, "Student id": student_id},
                 bucket=Bucket.BIG_STUDENT,
                 expected_event=EventType.SECTIONS_UPDATED,
+                event_subject=EventSubject.SECTION,
                 before={"School id": school_id, "Section id": old_section_id, "Student id": student_id},
                 note=note,
             )
@@ -388,6 +391,7 @@ def _big_student(
                 key={"Section id": new_section_id, "Student id": student_id},
                 bucket=Bucket.BIG_STUDENT,
                 expected_event=EventType.SECTIONS_UPDATED,
+                event_subject=EventSubject.SECTION,
                 after={"School id": school_id},
                 note=note,
             )
@@ -413,7 +417,8 @@ def _big_student(
                 operation=Operation.CREATE,
                 key={"Contact id": contact_id},
                 bucket=Bucket.BIG_STUDENT,
-                expected_event=EventType.CONTACTS_CREATED,
+                expected_event=EventType.USERS_CREATED,
+                event_subject=EventSubject.CONTACT,
                 after={
                     "School id": student.get("School id", ""),
                     "Student id": student["Student id"],
@@ -472,7 +477,8 @@ def _big_student(
                 operation=Operation.DELETE,
                 key={"Contact id": contact_id},
                 bucket=Bucket.BIG_STUDENT,
-                expected_event=EventType.CONTACTS_DELETED,
+                expected_event=EventType.USERS_DELETED,
+                event_subject=EventSubject.CONTACT,
                 before=dict(contact),
                 note=(
                     f"Big student: removed guardian contact {contact.get('Contact name', '')} "
@@ -541,6 +547,7 @@ def _big_teacher(
                 key={"Section id": section["Section id"]},
                 bucket=Bucket.BIG_TEACHER,
                 expected_event=EventType.SECTIONS_UPDATED,
+                event_subject=EventSubject.SECTION,
                 before={"Teacher 2 id": current_co},
                 after={"Teacher 2 id": new_co},
                 note=(
@@ -578,6 +585,7 @@ def _big_teacher(
                 key={"Section id": section["Section id"]},
                 bucket=Bucket.BIG_TEACHER,
                 expected_event=EventType.SECTIONS_UPDATED,
+                event_subject=EventSubject.SECTION,
                 before={"Teacher id": current_primary},
                 after={"Teacher id": new_primary},
                 note=(
@@ -611,7 +619,8 @@ def _big_teacher(
                 operation=Operation.CREATE,
                 key={"Teacher id": teacher_id},
                 bucket=Bucket.BIG_TEACHER,
-                expected_event=EventType.TEACHERS_CREATED,
+                expected_event=EventType.USERS_CREATED,
+                event_subject=EventSubject.TEACHER,
                 after={
                     "School id": school["School id"],
                     "Teacher number": teacher_id,

@@ -13,7 +13,7 @@ import pytest
 
 from drift_engine import guardrail
 from drift_engine.csvstack import CsvStack
-from drift_engine.models import Bucket, Change, EventType, GuardrailViolation, Operation
+from drift_engine.models import Bucket, Change, EventSubject, EventType, GuardrailViolation, Operation
 
 
 def _stack_with_counts(**counts: int) -> CsvStack:
@@ -51,7 +51,8 @@ def _delete_change(filename: str, key: str = "K1") -> Change:
         operation=Operation.DELETE,
         key={"id": key},
         bucket=Bucket.SMALL_DAILY,
-        expected_event=EventType.CONTACTS_DELETED,
+        expected_event=EventType.USERS_DELETED,
+        event_subject=EventSubject.CONTACT,
         before={"id": key},
     )
 
@@ -62,7 +63,8 @@ def _create_change(filename: str, key: str = "K1") -> Change:
         operation=Operation.CREATE,
         key={"id": key},
         bucket=Bucket.SMALL_DAILY,
-        expected_event=EventType.CONTACTS_CREATED,
+        expected_event=EventType.USERS_CREATED,
+        event_subject=EventSubject.CONTACT,
         after={"id": key},
     )
 

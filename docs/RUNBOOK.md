@@ -111,14 +111,25 @@ Before pointing this at a partner-facing sandbox for real:
    then open the Markdown report under `logs/<district-id>/` and check the
    "Mode" row says `DRY RUN`, that the expected-events table looks like a
    normal day, and that the guardrail section shows no `BLOCK`/`WARN`.
-4. **Confirm the absent-to-empty column question with Clever.** The first
-   real push adds the `Middle name` and `Teacher 2 id` columns as empty
-   values on every existing row (see [SCHEMA.md](SCHEMA.md)). Whether Clever
-   emits `users.updated`/`sections.updated` for a field going from *absent*
-   to *empty* is not verified — if it does, the first sync is a very large,
-   one-time event burst across the whole roster. This is the single biggest
-   unknown in the project; confirm the expected behaviour with Clever before
-   the first live push, not after.
+4. **Resolved, no longer a pre-go-live blocker:** whether the absent-to-empty
+   `Middle name`/`Teacher 2 id` columns (see [SCHEMA.md](SCHEMA.md)) produce a
+   first-sync field-change burst. They should not — `users.updated`/
+   `sections.updated` fire on a genuine object change, and an absent-to-empty
+   column is not one. (An earlier draft of this runbook listed this as "the
+   single biggest unknown in the project"; it wasn't actually unverifiable,
+   just unverified — see docs/SCHEMA.md's "Resolved" note.)
+5. **KNOWN BLOCKER — verify the CSV shape your sandbox actually accepts
+   before relying on any contact event.** Per Clever's SIS CSV docs, contacts
+   are columns on `students.csv` (`contact_name`, `contact_type`,
+   `contact_relationship`, `contact_phone`, `contact_phone_type`,
+   `contact_email`, `contact_sis_id`, up to 5 per student) — **not** their
+   own `contacts.csv` file. This engine currently writes a separate
+   `contacts.csv`, which Clever will most likely ignore. **Do not push
+   `contacts.csv` live, and do not trust any `users.created`/`users.updated`/
+   `users.deleted` (Contacts) prediction from this engine, until David has
+   verified which CSV shape his sandbox SFTP endpoint actually accepts.**
+   This rework is explicitly deferred — see [SCHEMA.md](SCHEMA.md)'s "KNOWN
+   BLOCKER" section. Do not implement it speculatively.
 
 ## First live push
 
@@ -127,8 +138,12 @@ Sequence these in order — do not skip ahead, and do not combine steps:
 1. **Confirm eventing** (checklist item 1 above) — flip `eventing_verified:
    true` only after Secure Sync / district-app token eventing is confirmed
    active in the Clever dashboard.
-2. **Confirm the column-addition question with Clever** (checklist item 4
-   above) — know what to expect from the first sync before it happens.
+2. **Resolve the KNOWN BLOCKER first** (checklist item 5 above) — verify
+   whether your sandbox actually wants contacts as columns on `students.csv`
+   or will accept this engine's separate `contacts.csv` as-is. Do not stage
+   contact seeding against an unverified CSV shape; a "successful" staged
+   seed against the wrong file shape teaches you nothing and may need to be
+   entirely redone.
 3. **Staged contacts seeding**: `drift-engine seed --limit 4000 --live`,
    repeated roughly **9 times** to cover the full 33,621-student district
    (see "Staged contacts seeding" below for the exact numbers and why
@@ -142,6 +157,12 @@ Sequence these in order — do not skip ahead, and do not combine steps:
    about and not representative of steady state.
 
 ## Staged contacts seeding
+
+> **KNOWN BLOCKER, see above:** this section describes seeding this engine's
+> own `contacts.csv`, which Clever's real SFTP ingest most likely ignores
+> (contacts belong on `students.csv` as columns — see SCHEMA.md). Do not
+> stage a live seed against a real sandbox until that's verified; the volume
+> math below is still correct, it's the file shape that's in question.
 
 `contacts.csv` doesn't exist until it's created — either by the normal
 weekly cadence's small guardian additions, or by a one-time/staged `seed`
@@ -158,10 +179,12 @@ $ drift-engine estimate-seed
   recommended_run_count: 9
 ```
 
-An unbounded seed pass would emit roughly **52,900 `contacts.created`
-events in a single sync** — an enormous, unrepresentative burst that would
-look like an outage or a bulk import gone wrong to the partner, nothing
-like the steady drift cadence this engine exists to produce.
+An unbounded seed pass would emit roughly **52,900 `users.created`
+(Contacts) events in a single sync** — an enormous, unrepresentative burst
+that would look like an outage or a bulk import gone wrong to the partner,
+nothing like the steady drift cadence this engine exists to produce. (Not a
+distinct `contacts.created` event — see docs/SCHEMA.md's "Corrected event
+types.")
 
 Recommended approach: stage it at `limit=4000` students per run, about **9
 runs** to cover the full district:
@@ -390,11 +413,14 @@ partner:
    a week with nothing removing one (+26 over 26 simulated weeks).
    Extrapolated, this breaches `safety.MAX_SCALE_DRIFT` (25%) after roughly
    7 years, at which point every run would block on the scale-sanity gate.
-   Follow-up work, not an active bug: it needs a new `EventType` for teacher
-   removal.
-2. **The absent-to-empty column question is unconfirmed** — see checklist
-   item 4 and "First live push" above. This is the single biggest unknown
-   in the project.
+   Follow-up work, not an active bug. Correction: this no longer needs a
+   *new* `EventType` — `USERS_DELETED` (with `EventSubject.TEACHER`) already
+   exists in the corrected enum — it just needs selection logic that picks a
+   teacher to remove.
+2. **KNOWN BLOCKER: contacts are very likely the wrong CSV shape.** See
+   checklist item 5 and "First live push" above, and docs/SCHEMA.md's "KNOWN
+   BLOCKER" section. Status: BLOCKED pending David verifying the CSV spec
+   his sandbox actually accepts. Do not implement the rework speculatively.
 3. **`eventing_verified` is still `false`** in `config/districts.yml` —
    Secure Sync / district-app token eventing has not been confirmed for
    this district. Must be verified before partner-facing use.
@@ -402,3 +428,8 @@ partner:
    installable in this build environment (no PyPI access), so the 2
    host-key-policy tests skip. Watch the first live push closely for
    retry/timeout/host-key surprises.
+
+Resolved (previously listed here): whether the absent-to-empty
+`Middle name`/`Teacher 2 id` columns produce a first-sync event burst. They
+should not — see docs/SCHEMA.md's "Resolved" note under the engine-added
+deviations section.

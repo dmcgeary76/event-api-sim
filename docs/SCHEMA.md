@@ -10,6 +10,24 @@ this sandbox's real export.
 Three columns/files are **added by this engine** and did not exist in the
 original export. They're covered in their own section below.
 
+## Corrected event types (2026-08-03)
+
+The project brief (§3) asserted that contacts had their own distinct event
+lifecycle — `contacts.created` / `contacts.updated` / `contacts.deleted` —
+as if they were separate types on Clever's wire protocol. **That assumption
+was factually wrong**, verified against Clever's live dev docs on
+2026-08-03: [Events API](https://dev.clever.com/docs/events-api) /
+[Contacts & guardians](https://dev.clever.com/docs/contacts-guardians). In
+API v3.x, contacts (guardians), students, teachers, staff, and district
+admins are all `users` objects on the wire — the only object-level events
+are `users.created` / `users.updated` / `users.deleted`, with role carried
+in the object's own `roles` node. Section membership changes remain their
+own `sections.*` events, unaffected. Every reference to `contacts.*` or
+`teachers.created` below has been corrected to the real wire event plus a
+role label (e.g. `users.updated (Contacts)`) — see
+`src/drift_engine/models.py`'s `EventType`/`EventSubject` for the
+implementation and `Change.expected_event_label` for how the two combine.
+
 ## The seven files
 
 For each file: exact column order as the engine writes it, the natural key
@@ -47,7 +65,8 @@ build.
 | Record type | `teachers` |
 | Mutable columns | `Teacher email`, `Last name`, `Title` |
 
-New rows are also **created** here on Fridays (`teachers.created`) — see
+New rows are also **created** here on Fridays (`users.created (Teachers)` —
+see below on why this is not a distinct `teachers.created` event) — see
 `selection._big_teacher`. `Teacher email`/`Last name`/`Title` are mutable in
 the schema but are not currently written to by any selection logic in this
 build; only row creation happens today.
@@ -99,8 +118,28 @@ since selection logic calls these lookups repeatedly per run.
 | Record type | `contacts` |
 | Mutable columns | `Email`, `Phone`, `Contact name`, `Relationship`, `Phone type` |
 
-**This entire file is engine-added** — see below. Drives all three of
-`contacts.created` / `contacts.updated` / `contacts.deleted`.
+**This entire file is engine-added** — see below. Drives all three of the
+contact lifecycle events: `users.created (Contacts)` / `users.updated
+(Contacts)` / `users.deleted (Contacts)` — **not** distinct
+`contacts.created`/`contacts.updated`/`contacts.deleted` events, which do not
+exist on Clever's real Events API. See "Corrected event types" below.
+
+> **KNOWN BLOCKER — this file is very likely the wrong shape.** Per
+> Clever's SIS CSV docs
+> ([Contacts & guardians](https://dev.clever.com/docs/contacts-guardians)),
+> Clever does not accept a standalone `contacts.csv` over SFTP at all.
+> Contacts are columns **on `students.csv`**: `contact_name`, `contact_type`,
+> `contact_relationship`, `contact_phone`, `contact_phone_type`,
+> `contact_email`, `contact_sis_id`, repeated for up to **5 contacts per
+> student** (`contact_name_2`, `contact_email_2`, ... through `_5`). This
+> engine's separate `contacts.csv` will most likely simply be ignored by a
+> real sandbox ingest. **Status: BLOCKED**, pending David verifying the exact
+> CSV shape his sandbox SFTP endpoint actually accepts — this rework is
+> explicitly **not** implemented here; do not attempt it speculatively. See
+> the README's "KNOWN BLOCKER" section for the related consequence: a
+> contact's Clever id is only stable when `contact_sis_id` is populated,
+> otherwise Clever derives identity from name+email, so an email edit reads
+> as delete-then-create rather than an update.
 
 ## A missing required column is a hard load error
 
@@ -123,9 +162,9 @@ assumptions layered on top of an ambiguous spec.
 
 | Addition | File | What was missing | Why it mattered |
 |---|---|---|---|
-| `Middle name` column | `students.csv` | No mutable student-level field existed that wasn't already load-bearing (e.g. `Last name` changes read oddly as a routine "drift" edit). | Without it, `users.updated` (brief §3, category 5 — "minor field change, e.g. middle name added") had no realistic field to edit. |
+| `Middle name` column | `students.csv` | No mutable student-level field existed that wasn't already load-bearing (e.g. `Last name` changes read oddly as a routine "drift" edit). | Without it, `users.updated (Students)` (brief §3, category 5 — "minor field change, e.g. middle name added") had no realistic field to edit. |
 | `Teacher 2 id` column | `sections.csv` | No co-teacher slot existed on a section. | Without it, the Friday `big_teacher` bucket's "swapping a co-teacher on a section" (brief §4) had nothing to change. |
-| `contacts.csv` (whole file) | — | The export had no guardian/contact records at all. | Without it, all three contact lifecycle events — `contacts.created`, `contacts.updated`, `contacts.deleted` (brief §3, categories 1–3) — were structurally impossible. |
+| `contacts.csv` (whole file) | — | The export had no guardian/contact records at all. | Without it, all three contact lifecycle events — `users.created`, `users.updated`, `users.deleted` (Contacts role; brief §3, categories 1–3) — were structurally impossible. **See the KNOWN BLOCKER above: this file is very likely the wrong shape for a real ingest and this is unresolved.** |
 
 ### What happens on the first sync after they appear
 
@@ -138,31 +177,23 @@ pointed at a stack for the first time.
 
 Practical effect, on that first sync:
 
-- Every row of `students.csv` and `sections.csv` will show up as a
-  **field change** (`users.updated` / `sections.updated`) to Clever's
-  diff, purely because the new column (`Middle name` / `Teacher 2 id`) now
-  exists where it previously didn't — not because the engine intentionally
-  edited every row. This is a one-time, whole-file event vs. the steady
-  handful-per-day cadence in every subsequent run.
+- **Resolved, good news (corrected 2026-08-03):** adding the empty
+  `Middle name`/`Teacher 2 id` columns should **not** produce a field-change
+  event burst. Clever's `users.updated`/`sections.updated` fire when Clever
+  detects a genuine change **on the object itself** (surfaced to the partner
+  via a `previous_attributes` hash) — an earlier draft of this document
+  treated whether an *absent → empty* column counts as that kind of change
+  as an open, unverified question, framed as "the single biggest unknown in
+  the project." It isn't open: absent-from-the-header to present-but-empty
+  is not a value change on any existing row, so there is nothing for
+  Clever's diff to see. `runner.run_once`'s log line has been updated to say
+  so rather than warn that the next sync WILL show these as field changes.
 - `contacts.csv` appears on the SFTP endpoint for the first time as a brand
-  new file. Every row in it — whether from a `seed` run or the normal
-  cadence's first `big_student` contact-add — is a genuine `contacts.created`
-  event, since there is no prior version of this file for Clever to diff
-  against.
-
-`runner.run_once` logs this explicitly (`"Added engine-owned columns on
-load: ...The next sync will show these as field changes on affected
-records."`) whenever a stack has migrated columns.
-
-**Open question, not yet verified against Clever's real ingest behaviour:**
-whether Clever's Events API actually emits `users.updated`/
-`sections.updated` for a column going from *absent from the header entirely*
-to *present with an empty value* is unconfirmed. If it does, that first sync
-is not a quiet no-op for every existing row — it is a very large, one-time
-event burst (potentially every row of `students.csv` and `sections.csv`).
-This is the single biggest unknown in the project and should be confirmed
-with Clever before the first live push (see docs/RUNBOOK.md's "First live
-push" section).
+  new file — **but see the KNOWN BLOCKER above: Clever very likely ignores
+  this file entirely**, since contacts belong on `students.csv` as columns,
+  not as their own file. Until that blocker is resolved, no
+  `users.created (Contacts)` events should be expected from this file
+  appearing, regardless of how many rows are in it.
 
 ## CRLF, no quoting, row order — and why it matters
 

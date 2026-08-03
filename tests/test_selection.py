@@ -28,7 +28,7 @@ import pytest
 
 from drift_engine import schema
 from drift_engine.csvstack import CsvStack
-from drift_engine.models import Bucket, EventType, Operation, RunPlan
+from drift_engine.models import Bucket, EventSubject, EventType, Operation, RunPlan
 from drift_engine.selection import select_changes
 
 CRLF = "\r\n"
@@ -294,6 +294,7 @@ def test_enrollment_moves_emit_sections_updated_never_users_updated(
     for c in enrollment_changes:
         assert c.expected_event is EventType.SECTIONS_UPDATED
         assert c.expected_event is not EventType.USERS_UPDATED
+        assert c.event_subject is EventSubject.SECTION
 
 
 def test_enrollment_moves_produce_matched_delete_create_pairs(
@@ -375,7 +376,9 @@ def test_contacts_added_are_ai_generated_and_create_events(
     added = [c for c in changes if c.filename == "contacts.csv" and c.operation is Operation.CREATE]
     assert added
     for c in added:
-        assert c.expected_event is EventType.CONTACTS_CREATED
+        assert c.expected_event is EventType.USERS_CREATED
+        assert c.event_subject is EventSubject.CONTACT
+        assert c.expected_event_label == "users.created (Contacts)"
         assert c.ai_generated is True
         assert c.note
 
@@ -477,7 +480,10 @@ def test_zero_contacts_still_produces_valid_small_daily_run(
 
     assert changes  # student edits still happen
     assert all(c.filename != "contacts.csv" for c in changes)
-    assert any(c.expected_event is EventType.USERS_UPDATED for c in changes)
+    assert any(
+        c.expected_event is EventType.USERS_UPDATED and c.event_subject is EventSubject.STUDENT
+        for c in changes
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -675,3 +681,65 @@ def test_find_move_target_varies_which_same_grade_section_it_picks() -> None:
     # eligible -- both must show up across enough seeds, not just whichever
     # sorts first.
     assert picks == {"SEC2", "SEC3"}
+
+
+# ---------------------------------------------------------------------------
+# Correction regression: EventType must only ever contain wire event names
+# Clever actually emits (project brief §3 wrongly assumed contacts/teachers
+# had their own distinct event types -- see models.EventType's docstring).
+# ---------------------------------------------------------------------------
+
+
+def test_event_type_enum_contains_only_real_clever_wire_events() -> None:
+    """No ``EventType`` member may be a name Clever does not emit on the
+    wire. Clever's Events API (v3.x) only ever emits ``users.*`` and
+    ``sections.*`` -- contacts/students/teachers/staff are all ``users``
+    objects, distinguished by role, not by event name. This test exists so a
+    future contributor cannot silently reintroduce a ``contacts.*``/
+    ``teachers.*`` member the way the original project brief did."""
+
+    allowed_prefixes = ("users.", "sections.")
+    for member in EventType:
+        assert member.value.startswith(allowed_prefixes), (
+            f"EventType.{member.name} = {member.value!r} is not a real Clever "
+            "wire event -- Clever only emits users.*/sections.* events."
+        )
+
+    # And explicitly: the wrong, brief-inherited event names must never come
+    # back as members of this enum.
+    banned_values = {
+        "contacts.created", "contacts.updated", "contacts.deleted", "teachers.created",
+    }
+    actual_values = {member.value for member in EventType}
+    assert not (actual_values & banned_values)
+
+
+def test_expected_event_label_matches_clevers_event_ordering_doc_phrasing() -> None:
+    """``Change.expected_event_label`` must read exactly like Clever's own
+    event-ordering documentation, e.g. 'users.updated (Contacts)' -- verified
+    against https://dev.clever.com/docs/events-api."""
+
+    from drift_engine.models import Change, EventSubject, Operation
+
+    change = Change(
+        filename="contacts.csv",
+        operation=Operation.UPDATE,
+        key={"Contact id": "CON000001"},
+        bucket=Bucket.SMALL_DAILY,
+        expected_event=EventType.USERS_UPDATED,
+        event_subject=EventSubject.CONTACT,
+        before={"Email": "old@example.com"},
+        after={"Email": "new@example.com"},
+    )
+    assert change.expected_event_label == "users.updated (Contacts)"
+
+    created = Change(
+        filename="students.csv",
+        operation=Operation.CREATE,
+        key={"Student id": "STU100001"},
+        bucket=Bucket.BIG_STUDENT,
+        expected_event=EventType.USERS_CREATED,
+        event_subject=EventSubject.STUDENT,
+        after={"First name": "New"},
+    )
+    assert created.expected_event_label == "users.created (Students)"

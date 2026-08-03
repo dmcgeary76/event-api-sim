@@ -20,7 +20,7 @@ import pytest
 from drift_engine import audit
 from drift_engine.csvstack import CsvStack
 from drift_engine.guardrail import evaluate as guardrail_evaluate
-from drift_engine.models import Bucket, Change, EventType, Operation, RunPlan, RunResult
+from drift_engine.models import Bucket, Change, EventSubject, EventType, Operation, RunPlan, RunResult
 
 # ---------------------------------------------------------------------------
 # Factories
@@ -40,6 +40,7 @@ def _change(
     key: dict | None = None,
     bucket: Bucket = Bucket.SMALL_DAILY,
     expected_event: EventType = EventType.USERS_UPDATED,
+    event_subject: EventSubject = EventSubject.STUDENT,
     before: dict | None = None,
     after: dict | None = None,
     note: str = "Small daily: set 'Middle name' for student Jordan Barnes (STU100000) to 'Rae'.",
@@ -59,6 +60,7 @@ def _change(
         key=key or {"Student id": "STU100000"},
         bucket=bucket,
         expected_event=expected_event,
+        event_subject=event_subject,
         before=before,
         after=after,
         note=note,
@@ -152,8 +154,14 @@ def test_json_round_trips_via_load_run(tmp_path: Path):
     assert change["before"] == {"Middle name": ""}
     assert change["after"] == {"Middle name": "Rae"}
     assert change["expected_event"] == "users.updated"
+    assert change["event_subject"] == "Students"
+    assert change["expected_event_label"] == "users.updated (Students)"
 
-    assert loaded["event_counts"] == {"users.updated": 1}
+    # event_counts is keyed by the human-readable LABEL (role breakdown);
+    # wire_event_counts is keyed by the bare wire event name Clever actually
+    # emits -- see SCHEMA_VERSION v2's note in audit.py.
+    assert loaded["event_counts"] == {"users.updated (Students)": 1}
+    assert loaded["wire_event_counts"] == {"users.updated": 1}
 
     # Full document must be plain-JSON (already guaranteed by json.loads, but
     # also re-dump it to be sure nothing non-serialisable snuck through).
@@ -183,9 +191,13 @@ def test_markdown_puts_expected_events_table_before_change_detail(tmp_path: Path
     detail_idx = text.index("## Change detail")
     assert events_idx < detail_idx
 
-    # The expected-events table itself must appear before the detail section.
-    table_idx = text.index("| Expected event | Count |")
+    # Both the role-breakdown table and the bare-wire-event table must appear
+    # before the detail section.
+    table_idx = text.index("| Expected event (role) | Count |")
+    wire_table_idx = text.index("| Wire event | Count |")
     assert table_idx < detail_idx
+    assert wire_table_idx < detail_idx
+    assert events_idx < table_idx < wire_table_idx
 
 
 def test_markdown_dry_run_is_unmistakable(tmp_path: Path):

@@ -147,6 +147,29 @@ before this version's first live use:
   ~7MB copy of the stack, including student names, DOBs, and guardian
   contact details. Output is now pruned to the 5 most recent directories
   per district after each successful dry run.
+- **`EventType` predicted event names that Clever does not emit (2026-08-03).**
+  The initial build's `EventType` enum, following the project brief §3,
+  included `CONTACTS_CREATED`/`CONTACTS_UPDATED`/`CONTACTS_DELETED` and
+  `TEACHERS_CREATED` — none of these are real Clever Events API wire events.
+  Verified against Clever's live dev docs
+  ([Events API](https://dev.clever.com/docs/events-api),
+  [Contacts & guardians](https://dev.clever.com/docs/contacts-guardians)):
+  in API v3.x, contacts (guardians), students, teachers, staff, and district
+  admins are all `users` objects — the only object-level wire events are
+  `users.created`/`users.updated`/`users.deleted`, with role carried in the
+  object's own `roles` node, not the event name. `EventType` now contains
+  only the six real wire events (`users.*` x3, `sections.*` x3). A new
+  `EventSubject` enum plus a required `Change.event_subject` field restore
+  the student/teacher/contact/staff breakdown for reporting purposes only
+  (`Change.expected_event_label`, e.g. `"users.updated (Contacts)"`) — this
+  is never part of the event Clever actually emits. `RunResult.event_counts()`
+  is now keyed by that label; a new `RunResult.wire_event_counts()` carries
+  the bare wire-name totals (what the partner's real `/events` feed shows).
+  The audit JSON schema is bumped to v2 to reflect this (`audit.SCHEMA_VERSION`).
+  The project brief's §3 assumption that contacts had their own distinct
+  event lifecycle was simply wrong; the brief itself is left unedited as the
+  historical input document, and this correction is called out at the top of
+  `models.py` so it doesn't read as a regression to a future maintainer.
 
 ### Security
 
@@ -203,13 +226,28 @@ Documented honestly rather than hidden; none block sandbox use today:
 - The Friday `big_teacher` bucket adds one new teacher a week with no
   attrition (+26 over 26 simulated weeks). Extrapolated, this breaches
   `safety.MAX_SCALE_DRIFT` (25%) after roughly 7 years, at which point every
-  run for that district would block. Deliberately not fixed yet — it needs
-  a new `EventType` for teacher removal.
-- Whether Clever's Events API emits `users.updated`/`sections.updated` for a
-  column going from absent to empty (the `Middle name`/`Teacher 2 id`
-  first-sync case) is not verified against Clever's real ingest behaviour.
-  If it does, the first live sync is a very large, one-time event burst.
-  This is the single biggest unknown in the project.
+  run for that district would block. Deliberately not fixed yet — follow-up
+  work, not a bug. Correction (2026-08-03): this no longer needs a *new*
+  `EventType` — `USERS_DELETED` with `EventSubject.TEACHER` already exists in
+  the corrected enum — it just needs selection logic that picks a teacher to
+  remove.
+- **KNOWN BLOCKER, not yet fixed: contacts are very likely the wrong CSV
+  shape.** Per Clever's SIS CSV docs
+  ([Contacts & guardians](https://dev.clever.com/docs/contacts-guardians)),
+  contacts shared over SFTP are not a separate `contacts.csv` — they are
+  columns on `students.csv` (`contact_name`, `contact_type`,
+  `contact_relationship`, `contact_phone`, `contact_phone_type`,
+  `contact_email`, `contact_sis_id`), capped at 5 contacts per student. This
+  engine currently writes a separate `contacts.csv`, which Clever will most
+  likely ignore — meaning none of this engine's predicted
+  `users.created`/`users.updated`/`users.deleted` (Contacts) events would
+  actually fire against a real ingest. Relatedly, a contact's Clever id is
+  only stable when `contact_sis_id` is populated; otherwise Clever derives
+  identity from name+email, so an email edit reads as a delete+create, not
+  an update. **Status: BLOCKED** pending David verifying the CSV spec his
+  sandbox actually accepts. Deliberately **not implemented** here — do not
+  attempt this rework speculatively; see `docs/SCHEMA.md`'s "KNOWN BLOCKER"
+  section.
 - `eventing_verified` is still `false` in `config/districts.yml` — Secure
   Sync / district-app token eventing has not been confirmed active for this
   district (brief §9). Must be verified before partner-facing use.
@@ -217,3 +255,12 @@ Documented honestly rather than hidden; none block sandbox use today:
   verification) is code-reviewed but never executed — `paramiko` is not
   installable in this build environment, so 2 tests skip. Watch the first
   live push closely.
+
+**Resolved** (previously listed here as an open risk, corrected 2026-08-03):
+whether Clever's Events API emits `users.updated`/`sections.updated` for a
+column going from absent to empty (the `Middle name`/`Teacher 2 id`
+first-sync case). It does not — Clever's `users.updated` fires on a genuine
+object change (surfaced via `previous_attributes`), and an absent-to-empty
+column is not one. `runner.py`'s log line on migrated columns has been
+corrected to say so instead of warning that the next sync WILL show these as
+field changes.

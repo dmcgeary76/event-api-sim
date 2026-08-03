@@ -6,9 +6,13 @@ Clever spec. Three columns/files are ADDED by this engine because the stack
 lacked any mutable surface for the change categories the project brief
 requires:
 
-  * students.csv  -> "Middle name"  (drives users.updated)
+  * students.csv  -> "Middle name"  (drives users.updated (Students))
   * sections.csv  -> "Teacher 2 id" (drives Friday co-teacher changes)
-  * contacts.csv  -> whole file     (drives contacts.created/updated/deleted)
+  * contacts.csv  -> whole file     (drives users.created/updated/deleted
+                                     (Contacts) -- NOT distinct contacts.*
+                                     wire events; see models.EventType and
+                                     the KNOWN BLOCKER in docs/SCHEMA.md
+                                     about this file's shape being wrong)
 
 All three are optional fields in Clever's SIS CSV spec, so adding them is
 schema-legal. See docs/SCHEMA.md for the rationale and the seeding plan.

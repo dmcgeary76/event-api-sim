@@ -167,7 +167,7 @@ def _clean_email_token(value: str) -> str:
 #: DIFFERENT plausible address for the same name (Fix 1: a small-daily
 #: "email address tweak" that recomputes the exact same value from the exact
 #: same inputs is not a change at all -- Clever's CSV diff sees nothing, and
-#: no ``contacts.updated`` event is ever emitted, no matter how often
+#: no ``users.updated`` event is ever emitted, no matter how often
 #: selection.py "edits" that field).
 _EMAIL_LOCAL_TEMPLATES: tuple = (
     lambda f, l: f"{f}.{l}",

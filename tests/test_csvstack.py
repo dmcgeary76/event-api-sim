@@ -14,7 +14,7 @@ import pytest
 
 from drift_engine import schema
 from drift_engine.csvstack import CsvStack
-from drift_engine.models import Bucket, Change, EventType, Operation
+from drift_engine.models import Bucket, Change, EventSubject, EventType, Operation
 
 CRLF = "\r\n"
 
@@ -279,6 +279,7 @@ def _change(
         key=key,
         bucket=Bucket.SMALL_DAILY,
         expected_event=EventType.USERS_UPDATED,
+        event_subject=EventSubject.STUDENT,
         after=after or {},
     )
 
@@ -507,6 +508,7 @@ def test_save_leaves_target_dir_byte_identical_after_a_write_failure_partway(
                 key={"Student id": "STU1"},
                 bucket=Bucket.SMALL_DAILY,
                 expected_event=EventType.USERS_UPDATED,
+                event_subject=EventSubject.STUDENT,
                 after={"Middle name": "ShouldNotAppear"},
             )
         ]

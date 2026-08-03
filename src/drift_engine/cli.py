@@ -120,7 +120,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=4000,
         help="max students to give guardians this run. Staging avoids one huge "
-        "contacts.created burst; see docs/RUNBOOK.md.",
+        "users.created (Contacts) burst; see docs/RUNBOOK.md.",
     )
     ss.add_argument("--live", action="store_true")
     ss.add_argument("--seed", type=int, default=None)

@@ -16,7 +16,7 @@ import pytest
 
 from drift_engine import schema
 from drift_engine.csvstack import CsvStack
-from drift_engine.models import Operation
+from drift_engine.models import EventSubject, EventType, Operation
 from drift_engine.seed import estimate_seed_volume, seed_contacts
 
 CRLF = "\r\n"
@@ -151,6 +151,11 @@ def test_every_student_gets_one_or_two_contacts_with_correct_keys(
     assert changes
     assert all(c.operation is Operation.CREATE for c in changes)
     assert all(c.filename == schema.CONTACTS.filename for c in changes)
+    # Seeded contacts are users.created (Contacts) on Clever's real Events
+    # API, not a distinct contacts.created event -- see models.EventType.
+    assert all(c.expected_event is EventType.USERS_CREATED for c in changes)
+    assert all(c.event_subject is EventSubject.CONTACT for c in changes)
+    assert all(c.expected_event_label == "users.created (Contacts)" for c in changes)
 
     by_student: dict[str, list] = {}
     for c in changes:

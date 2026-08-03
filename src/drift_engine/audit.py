@@ -83,7 +83,23 @@ logger = logging.getLogger(__name__)
 #: Bumped whenever the JSON record's shape changes in a way a reader would
 #: need to know about. Round-trip consumers (``load_run`` callers, a future
 #: dashboard) should check this before assuming field presence.
-SCHEMA_VERSION = 1
+#:
+#: v2 (2026-08-03): corrected a factual error inherited from the project
+#: brief -- Clever's Events API has no contacts.*/teachers.* event types (see
+#: models.EventType's docstring). Two consequences for THIS schema:
+#:   * ``changes[].expected_event`` now only ever contains a bare
+#:     ``users.*``/``sections.*`` wire value, never e.g. ``contacts.created``.
+#:   * ``changes[].event_subject`` and ``changes[].expected_event_label`` are
+#:     new fields -- the role/object (Students/Teachers/Contacts/Staff/
+#:     Sections) an event is really about, and the two combined into a
+#:     human-readable label, respectively.
+#:   * ``event_counts`` is now keyed by that human-readable LABEL (e.g.
+#:     ``"users.updated (Contacts)"``), not the bare wire event name, so
+#:     David's per-role breakdown survives the collapse into ``users.*``. A
+#:     new ``wire_event_counts`` field carries the bare wire-name totals --
+#:     what the partner's real ``/events`` feed will actually show -- since
+#:     that information is no longer recoverable from ``event_counts`` alone.
+SCHEMA_VERSION = 2
 
 _HISTORY_FILENAME = "history.jsonl"
 
@@ -192,7 +208,14 @@ def _change_to_dict(change: Change) -> dict[str, Any]:
         "operation": change.operation.value,
         "key": dict(change.key),
         "bucket": change.bucket.value,
+        # Bare wire event name Clever actually emits -- never contacts.*/
+        # teachers.*, see models.EventType.
         "expected_event": change.expected_event.value,
+        # Role/object this event is really about (Students/Teachers/
+        # Contacts/Staff/Sections) -- see models.EventSubject.
+        "event_subject": change.event_subject.value,
+        # The two combined, for display -- e.g. "users.updated (Contacts)".
+        "expected_event_label": change.expected_event_label,
         "before": _redact(dict(change.before)),
         "after": _redact(dict(change.after)),
         "note": change.note,
@@ -224,7 +247,12 @@ def _build_record(
         "duration_seconds": _duration_seconds(result),
         "ok": result.ok,
         "error": result.error,
+        # Keyed by human-readable LABEL (e.g. "users.updated (Contacts)") --
+        # David's per-role breakdown. See SCHEMA_VERSION v2 note above.
         "event_counts": result.event_counts(),
+        # Keyed by the BARE wire event name (e.g. "users.updated") -- what
+        # the partner's real Events API /events feed will actually show.
+        "wire_event_counts": result.wire_event_counts(),
         "changes": [_change_to_dict(c) for c in result.changes],
         "guardrail": _redact(dict(result.guardrail)) if result.guardrail else {},
         "pushed_files": list(result.pushed_files),
@@ -380,10 +408,29 @@ def _build_markdown(
     lines.append("## Events the partner should see")
     lines.append("")
     event_counts = result.event_counts()
+    wire_event_counts = result.wire_event_counts()
     if event_counts:
-        lines.append("| Expected event | Count |")
+        lines.append(
+            "**By role (David's breakdown)** -- Clever's wire event alone (below) collapses "
+            "students/teachers/contacts/staff into `users.*`; this table restores that "
+            "distinction for review purposes. This is NOT a separate event type on the wire."
+        )
+        lines.append("")
+        lines.append("| Expected event (role) | Count |")
         lines.append("|---|---|")
-        for event, count in event_counts.items():
+        for label, count in event_counts.items():
+            lines.append(f"| {label} | {count} |")
+        lines.append("")
+        lines.append(
+            "**By wire event (what the partner's `/events` feed actually shows)** -- Clever "
+            "has no `contacts.*`/`teachers.*` event types; contacts, students, teachers, and "
+            "staff are all `users.*` on the wire (role carried in the object's `roles` node, "
+            "not the event name)."
+        )
+        lines.append("")
+        lines.append("| Wire event | Count |")
+        lines.append("|---|---|")
+        for event, count in wire_event_counts.items():
             lines.append(f"| {event} | {count} |")
     else:
         lines.append(
@@ -412,12 +459,12 @@ def _build_markdown(
             for filename in sorted(by_file):
                 lines.append(f"**{filename}**")
                 lines.append("")
-                lines.append("| Key | Change | Expected event | Note |")
+                lines.append("| Key | Change | Expected event (role) | Note |")
                 lines.append("|---|---|---|---|")
                 for c in by_file[filename]:
                     lines.append(
                         f"| {_md_cell(c.key_str)} | {_md_cell(_describe_change(c))} | "
-                        f"{c.expected_event.value} | {_md_cell(c.note)} |"
+                        f"{c.expected_event_label} | {_md_cell(c.note)} |"
                     )
                 lines.append("")
 
@@ -428,12 +475,12 @@ def _build_markdown(
         if stray:
             lines.append("### Other changes (bucket not in today's plan)")
             lines.append("")
-            lines.append("| Key | Bucket | Change | Expected event | Note |")
+            lines.append("| Key | Bucket | Change | Expected event (role) | Note |")
             lines.append("|---|---|---|---|---|")
             for c in stray:
                 lines.append(
                     f"| {_md_cell(c.key_str)} | {c.bucket.value} | "
-                    f"{_md_cell(_describe_change(c))} | {c.expected_event.value} | "
+                    f"{_md_cell(_describe_change(c))} | {c.expected_event_label} | "
                     f"{_md_cell(c.note)} |"
                 )
             lines.append("")
@@ -503,7 +550,10 @@ def _build_history_record(
         "weekday": plan.weekday_name,
         "dry_run": result.dry_run,
         "total_changes": len(result.changes),
+        # Label-keyed (David's role breakdown); see SCHEMA_VERSION v2 note.
         "event_counts": result.event_counts(),
+        # Bare wire-name totals -- what the partner's /events feed shows.
+        "wire_event_counts": result.wire_event_counts(),
         "worst_guardrail_ratio": _worst_guardrail_ratio(result.guardrail),
         "ok": result.ok,
         "error": result.error,
@@ -728,9 +778,9 @@ def summarise_history(logs_root: str | Path, district: str, *, days: int = 30) -
     for r in recent:
         for event, count in (r.get("event_counts") or {}).items():
             event_totals[event] = event_totals.get(event, 0) + count
-    lines.append("## Cumulative expected events")
+    lines.append("## Cumulative expected events (by role)")
     lines.append("")
-    lines.append("| Event type | Count |")
+    lines.append("| Event (role) | Count |")
     lines.append("|---|---|")
     if event_totals:
         for event in sorted(event_totals):
@@ -738,6 +788,19 @@ def summarise_history(logs_root: str | Path, district: str, *, days: int = 30) -
     else:
         lines.append("| (none) | 0 |")
     lines.append("")
+
+    wire_totals: dict[str, int] = {}
+    for r in recent:
+        for event, count in (r.get("wire_event_counts") or {}).items():
+            wire_totals[event] = wire_totals.get(event, 0) + count
+    if wire_totals:
+        lines.append("## Cumulative expected events (bare wire event -- what `/events` shows)")
+        lines.append("")
+        lines.append("| Wire event | Count |")
+        lines.append("|---|---|")
+        for event in sorted(wire_totals):
+            lines.append(f"| {event} | {wire_totals[event]} |")
+        lines.append("")
 
     lines.append("## Failed runs")
     lines.append("")

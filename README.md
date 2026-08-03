@@ -49,19 +49,42 @@ Run `drift-engine schedule` to print this table straight from the code.
 
 ## Event types produced
 
-| Event | Produced by |
-|---|---|
-| `contacts.created` | Small daily / big-student guardian additions, and staged `seed` runs |
-| `contacts.updated` | Small daily contact field edits (email, phone, phone type) |
-| `contacts.deleted` | Big-student guardian removals (never orphans a student's last contact) |
-| `sections.updated` | Big-student enrollment moves; big-teacher co-teacher/primary-teacher changes |
-| `users.updated` | Small daily student field edits (middle name, student email) |
-| `teachers.created` | Big-teacher new-teacher additions (Friday) |
+> **Corrected 2026-08-03: the project brief (§3) was factually wrong about
+> this.** The brief asserted that contacts had their own distinct event
+> lifecycle — `contacts.created` / `contacts.updated` / `contacts.deleted` —
+> as if they were separate wire event types. **They are not, and never have
+> been, on Clever's real Events API.** Verified against Clever's live dev
+> docs on 2026-08-03
+> ([Events API](https://dev.clever.com/docs/events-api),
+> [Contacts & guardians](https://dev.clever.com/docs/contacts-guardians)):
+> in API v3.x, contacts (guardians), students, teachers, staff, and district
+> admins are ALL `users` on the wire. The only object-level events are
+> `users.created` / `users.updated` / `users.deleted`, and the role is
+> carried in the object's own `roles` node — not in the event name. Section
+> membership changes remain their own `sections.*` events, unaffected by this
+> correction. `EventType` (`src/drift_engine/models.py`) has been corrected
+> to the six real wire events; a new `EventSubject` field on `Change`
+> restores the student/teacher/contact/staff distinction for reporting
+> purposes only (see `Change.expected_event_label`) — it is never part of the
+> event name Clever itself emits. This document, and every other doc in this
+> project, is corrected below to match reality; the brief itself is left
+> as-is as the historical (and, on this point, incorrect) input document.
 
-The first five are the categories from project brief §3. `teachers.created`
-is a sixth type the build added because brief §4's Friday bucket explicitly
-calls for "adding a new teacher to the district," which structurally
-requires its own event type beyond the five originally enumerated in §3.
+| Wire event (what Clever actually emits) | Role (David's label) | Produced by |
+|---|---|---|
+| `users.created` | Contacts | Small daily / big-student guardian additions, and staged `seed` runs |
+| `users.updated` | Contacts | Small daily contact field edits (email, phone, phone type) |
+| `users.deleted` | Contacts | Big-student guardian removals (never orphans a student's last contact) |
+| `users.updated` | Students | Small daily student field edits (middle name, student email) |
+| `users.created` | Teachers | Big-teacher new-teacher additions (Friday) |
+| `sections.updated` | Sections | Big-student enrollment moves; big-teacher co-teacher/primary-teacher changes |
+
+There are only six real `EventType` members
+(`USERS_CREATED`/`USERS_UPDATED`/`USERS_DELETED`/`SECTIONS_CREATED`/
+`SECTIONS_UPDATED`/`SECTIONS_DELETED`) — every row above maps to one of them.
+`Change.expected_event_label` renders the combination exactly the way
+Clever's own event-ordering docs disambiguate by role, e.g.
+`users.updated (Contacts)`.
 
 Every generated `Email`/`Phone`/`Middle name`/`Student email` "update" is now
 checked to actually differ from the current value before it's written —
@@ -70,9 +93,47 @@ entirely if it still matches. Before this fix, `guardian_email`/
 `student_email` were pure functions of (name, student), so a repeat "edit"
 recomputed the identical address every time; Clever's CSV diff saw nothing,
 so no event ever fired no matter how often selection "edited" that field.
-Audit finding: ~62% of predicted `contacts.updated` events over 26 simulated
-weeks were silent no-ops on the Email field. Measured after the fix: 0%
-no-op rate across every updated field.
+Audit finding: ~62% of predicted `users.updated (Contacts)` events over 26
+simulated weeks were silent no-ops on the Email field. Measured after the
+fix: 0% no-op rate across every updated field.
+
+### KNOWN BLOCKER — contacts are not a separate CSV on Clever's real SFTP feed
+
+**Status: BLOCKED, not yet fixed — do not assume this engine's `contacts.csv`
+is correct.** Per Clever's SIS CSV documentation
+([Contacts & guardians](https://dev.clever.com/docs/contacts-guardians)),
+contacts shared over SFTP are **not** their own `contacts.csv` file. They are
+a fixed set of columns **on `students.csv` itself** —
+`contact_name`, `contact_type`, `contact_relationship`, `contact_phone`,
+`contact_phone_type`, `contact_email`, `contact_sis_id` — repeated up to
+**5 times per student** (`contact_name_2`, `contact_email_2`, etc.). This
+engine currently writes a **separate `contacts.csv`**, which Clever will most
+likely simply ignore, meaning none of this engine's predicted
+`users.created`/`users.updated`/`users.deleted` (Contacts) events would
+actually fire against a real sandbox ingest.
+
+A second, related wrinkle for whenever this is picked up: a contact's Clever
+ID is only stable across syncs when `contact_sis_id` is populated on that
+student row. Without it, Clever derives the contact's identity from
+name+email, so something as small as an email correction reads to Clever as
+a **delete-then-create of a whole new contact**, not an update — the exact
+opposite of what a "contact field edit" is meant to demonstrate.
+
+This is explicitly **deferred** — do not implement the `students.csv`-column
+rework without David first verifying which CSV shape his actual sandbox
+SFTP endpoint accepts. Tracked here so it is not silently forgotten.
+
+### Resolved: the absent → empty column question is no longer an open risk
+
+The `Middle name`/`Teacher 2 id` engine-added columns (see
+[docs/SCHEMA.md](docs/SCHEMA.md)) load as empty strings on every existing row
+the first time this engine touches a district's stack. Earlier drafts of
+this project treated whether that produces a field-change event burst as an
+open, unverified question. It does not: Clever's `users.updated` fires when
+it detects a change **on the object** (surfaced via `previous_attributes`),
+and a column going from *absent-from-the-header* to *present-but-empty* is
+not a value change on any existing student/section — there is nothing for
+Clever's diff to see. No first-sync burst is expected from this alone.
 
 ## Quickstart
 
@@ -109,7 +170,7 @@ and `-v/--verbose` at the top level. Full command list from `drift-engine
 | `plan --date YYYY-MM-DD` | Show which bucket(s) apply on a given date (defaults to today). |
 | `run [--district ID] [--live] [--force] [--seed N] [--canned-content]` | Execute a drift run. Dry run unless `--live`. `--force` runs the bucket logic even on a weekend (still subject to the guardrail and safety gates). `--seed` makes the run reproducible. |
 | `seed [--district ID] [--limit N=4000] [--live] [--seed N] [--canned-content]` | Create baseline `contacts.csv` guardian records for students that have none, `--limit` students at a time. See [docs/RUNBOOK.md](docs/RUNBOOK.md) for why this must be staged. |
-| `estimate-seed [--district ID]` | Report how many `contacts.created` events an unbounded seed pass would generate — read-only, no writes. |
+| `estimate-seed [--district ID]` | Report how many `users.created (Contacts)` events an unbounded seed pass would generate — read-only, no writes. |
 | `history [--district ID] [--days N=30]` | Summarise recent runs from `logs/<district>/history.jsonl` (runs per weekday, cumulative event counts, failures, AI-vs-canned trend). |
 | `simulate-week [--district ID] [--start YYYY-MM-DD] [--seed N=1234]` | Dry-run a full Mon–Fri locally, in memory, to preview a week of activity without touching persistent state. |
 
@@ -273,7 +334,8 @@ use a fixed, documented exit-code contract:
 ```
 src/drift_engine/
   schema.py      # CSV column contract, file specs, natural keys
-  models.py      # shared dataclasses: Change, RunPlan, RunResult, EventType
+  models.py      # shared dataclasses: Change, RunPlan, RunResult, EventType,
+                 # EventSubject (see the corrected event-type note in this file)
   safety.py      # sandbox-only hard gates: host/username allowlist, fingerprint
                  # (presence + strength), scale sanity, production-marker tripwire
   config.py      # loads config/districts.yml + .env (PyYAML, with a stdlib fallback parser)
@@ -326,7 +388,7 @@ never as `python3 -m scripts.minipytest` (see the module docstring for why):
 python3 scripts/minipytest.py
 ```
 
-Current result: **220 passed, 2 skipped** (the 2 skips are `paramiko`
+Current result: **222 passed, 2 skipped** (the 2 skips are `paramiko`
 host-key-policy tests — `paramiko` isn't installable in the no-PyPI build
 sandbox; they run under real pytest with `paramiko` installed). Real
 paramiko behaviour (retry, timeout, host-key policy, size verification) is
@@ -343,23 +405,26 @@ but all four should be understood before a first live push:
    teachers measured over 26 simulated weeks). Extrapolated, this eventually
    breaches `safety.MAX_SCALE_DRIFT` (25%) — roughly 7 years out at the
    current rate — at which point every run for that district would block on
-   the scale-sanity gate. Deliberately not fixed yet: it needs a new
-   `EventType` for teacher removal, which is follow-up work, not a bug.
-2. **The absent-to-empty column question is unverified.** The first live
-   push adds the `Middle name` and `Teacher 2 id` columns as empty values on
-   every existing row (see [docs/SCHEMA.md](docs/SCHEMA.md)). Whether Clever
-   actually emits `users.updated`/`sections.updated` for a field going from
-   *absent* to *empty* has not been verified against Clever's real ingest
-   behaviour. If it does, the first sync after go-live is a very large,
-   one-time event burst. **This is the single biggest unknown in this
-   project** — confirm it with Clever before the first live push (see
-   [docs/RUNBOOK.md](docs/RUNBOOK.md)'s "First live push" sequence).
+   the scale-sanity gate. Deliberately not fixed yet: this is follow-up work,
+   not a bug. Note this no longer needs a *new* `EventType` — `USERS_DELETED`
+   with `EventSubject.TEACHER` already exists — it just needs selection
+   logic that picks a teacher to remove.
+2. **KNOWN BLOCKER: contacts are not their own CSV on Clever's real SFTP
+   feed.** See "KNOWN BLOCKER" under [Event types produced](#event-types-produced)
+   above — this engine's `contacts.csv` is very likely the wrong shape for a
+   real sandbox ingest. Deferred pending David verifying the CSV spec his
+   sandbox actually accepts; do not implement the rework speculatively.
 3. **`eventing_verified` is still `false`.** Secure Sync / district-app
    token eventing has not been confirmed active for this district (brief
    §9). Must be verified in the Clever dashboard before any partner-facing
    use.
 4. **paramiko is untested in this build.** See the test-suite note above —
    real SFTP transport behaviour is reviewed, not executed.
+
+Resolved (previously listed here as an open risk): whether the
+`Middle name`/`Teacher 2 id` engine-added columns loading as empty produces a
+first-sync event burst. It does not — see "Resolved" under
+[Event types produced](#event-types-produced) above.
 
 ## More documentation
 

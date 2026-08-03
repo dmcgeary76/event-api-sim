@@ -530,8 +530,9 @@ def _run_once_locked(
     )
     if stack.migrated_columns:
         log.info(
-            "Added engine-owned columns on load: %s. The next sync will show these "
-            "as field changes on affected records.",
+            "Added engine-owned columns on load: %s. This should NOT produce a field-change "
+            "event burst on the next sync -- Clever's users.updated fires on a genuine object "
+            "change, and an absent-to-empty column is not one. See docs/SCHEMA.md.",
             stack.migrated_columns,
         )
 

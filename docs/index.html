@@ -186,19 +186,55 @@
 
     <section>
       <h2>Event types produced</h2>
+      <div class="card" style="margin-bottom:1rem;">
+        <p class="muted" style="margin:0;">
+          <strong>Corrected 2026-08-03:</strong> the project brief (§3)
+          incorrectly assumed contacts had their own distinct event types
+          (<code>contacts.created</code>/<code>contacts.updated</code>/<code>contacts.deleted</code>).
+          They do not exist on Clever's real Events API. Verified against
+          Clever's live dev docs
+          (<a href="https://dev.clever.com/docs/events-api">Events API</a>,
+          <a href="https://dev.clever.com/docs/contacts-guardians">Contacts &amp; guardians</a>):
+          in API v3.x, contacts, students, teachers, staff, and district
+          admins are all <code>users</code> objects on the wire — only
+          <code>users.created</code>/<code>users.updated</code>/<code>users.deleted</code>
+          and <code>sections.*</code> are real events. Role is carried in the
+          object's own <code>roles</code> node, not the event name. The table
+          below shows both the real wire event and the role label this
+          engine's reports use for readability.
+        </p>
+      </div>
       <table>
         <thead>
-          <tr><th>Event</th><th>Produced by</th></tr>
+          <tr><th>Wire event (real)</th><th>Role</th><th>Produced by</th></tr>
         </thead>
         <tbody>
-          <tr><td><code>contacts.created</code></td><td>Small daily / big-student guardian additions, and staged seed runs</td></tr>
-          <tr><td><code>contacts.updated</code></td><td>Small daily contact field edits (email, phone, phone type)</td></tr>
-          <tr><td><code>contacts.deleted</code></td><td>Big-student guardian removals (never orphans a student's last contact)</td></tr>
-          <tr><td><code>sections.updated</code></td><td>Big-student enrollment moves; big-teacher co-teacher/primary-teacher changes</td></tr>
-          <tr><td><code>users.updated</code></td><td>Small daily student field edits (middle name, student email)</td></tr>
-          <tr><td><code>teachers.created</code></td><td>Big-teacher new-teacher additions (Friday)</td></tr>
+          <tr><td><code>users.created</code></td><td>Contacts</td><td>Small daily / big-student guardian additions, and staged seed runs</td></tr>
+          <tr><td><code>users.updated</code></td><td>Contacts</td><td>Small daily contact field edits (email, phone, phone type)</td></tr>
+          <tr><td><code>users.deleted</code></td><td>Contacts</td><td>Big-student guardian removals (never orphans a student's last contact)</td></tr>
+          <tr><td><code>users.updated</code></td><td>Students</td><td>Small daily student field edits (middle name, student email)</td></tr>
+          <tr><td><code>users.created</code></td><td>Teachers</td><td>Big-teacher new-teacher additions (Friday)</td></tr>
+          <tr><td><code>sections.updated</code></td><td>Sections</td><td>Big-student enrollment moves; big-teacher co-teacher/primary-teacher changes</td></tr>
         </tbody>
       </table>
+      <div class="card" style="margin-top:1rem; border-color: var(--red);">
+        <h3 style="color: var(--red);">KNOWN BLOCKER — contacts.csv is very likely the wrong shape</h3>
+        <p class="muted" style="margin:0;">
+          Per Clever's SIS CSV docs, contacts shared over SFTP are columns
+          <strong>on <code>students.csv</code></strong>
+          (<code>contact_name</code>, <code>contact_type</code>,
+          <code>contact_relationship</code>, <code>contact_phone</code>,
+          <code>contact_phone_type</code>, <code>contact_email</code>,
+          <code>contact_sis_id</code>, up to 5 per student) — <strong>not</strong>
+          a separate <code>contacts.csv</code> file. This engine currently
+          writes a separate file, which Clever will most likely ignore. A
+          contact's Clever id is also only stable when <code>contact_sis_id</code>
+          is populated; otherwise an email edit reads as a delete+create, not
+          an update. <strong>Status: BLOCKED</strong> pending David verifying
+          the CSV spec his sandbox actually accepts — deliberately not
+          implemented speculatively. See <code>docs/SCHEMA.md</code>.
+        </p>
+      </div>
     </section>
 
     <section>
@@ -271,13 +307,14 @@
       <div class="card">
         <div class="status-grid">
           <div class="status-item"><span class="status-label">Version</span><span><span class="pill p-blue">v0.1.0</span></span></div>
-          <div class="status-item"><span class="status-label">Test suite</span><span><span class="pill p-green">220 passed</span> · 2 skipped (paramiko host-key tests, no PyPI in build sandbox)</span></div>
+          <div class="status-item"><span class="status-label">Test suite</span><span><span class="pill p-green">222 passed</span> · 2 skipped (paramiko host-key tests, no PyPI in build sandbox)</span></div>
           <div class="status-item"><span class="status-label">Dry-run verification</span><span>Verified against the real sandbox stack — 69 schools, 33,621 students, 1,866 teachers, 280 staff, 4,504 sections, 104,031 enrollments</span></div>
-          <div class="status-item"><span class="status-label">Simulated week (seed 42)</span><span>~58 changes across Mon–Fri; a 4-week run produced all six event types, worst deletion ratio ~0% against the 10% pause threshold</span></div>
+          <div class="status-item"><span class="status-label">Simulated week (seed 42)</span><span>~58 changes across Mon–Fri; a 4-week run produced all six event/role combinations, worst deletion ratio ~0% against the 10% pause threshold</span></div>
           <div class="status-item"><span class="status-label">Pending: eventing verification</span><span><span class="pill p-amber">Open</span> — Secure Sync / district-app token eventing not yet confirmed active for the target district (brief §9); <code>eventing_verified: false</code></span></div>
-          <div class="status-item"><span class="status-label">Pending: staged contacts seeding</span><span><span class="pill p-amber">Open</span> — 33,621 students with 0 contacts; staged plan is ~4,000 students/run over ~9 runs</span></div>
-          <div class="status-item"><span class="status-label">Open question: column-addition burst</span><span><span class="pill p-amber">Unconfirmed</span> — does Clever emit events for a column going absent&rarr;empty on the first live push? Biggest unknown in the project; confirm with Clever first</span></div>
-          <div class="status-item"><span class="status-label">Known limitation: teacher growth</span><span><span class="pill p-amber">Deferred</span> — +1 teacher/week with no attrition; breaches the 25% scale-sanity ceiling in ~7 years; needs a teacher-removal event type</span></div>
+          <div class="status-item"><span class="status-label">KNOWN BLOCKER: contacts.csv shape</span><span><span class="pill p-red">Blocked</span> — contacts likely belong on students.csv, not a separate file; pending David verifying the CSV spec his sandbox accepts; see Event types section above</span></div>
+          <div class="status-item"><span class="status-label">Pending: staged contacts seeding</span><span><span class="pill p-amber">Open</span> — 33,621 students with 0 contacts; staged plan is ~4,000 students/run over ~9 runs; blocked on the item above first</span></div>
+          <div class="status-item"><span class="status-label">Resolved: column-addition burst</span><span><span class="pill p-green">Resolved</span> — absent&rarr;empty columns do not produce a users.updated/sections.updated burst; Clever's diff only fires on an actual value change</span></div>
+          <div class="status-item"><span class="status-label">Known limitation: teacher growth</span><span><span class="pill p-amber">Deferred</span> — +1 teacher/week with no attrition; breaches the 25% scale-sanity ceiling in ~7 years; no longer needs a new EventType (users.deleted already exists), just removal selection logic</span></div>
           <div class="status-item"><span class="status-label">Untested: real paramiko transport</span><span><span class="pill p-amber">Code-reviewed only</span> — not installable in this build environment; watch the first live push closely</span></div>
         </div>
       </div>
@@ -319,10 +356,11 @@ drift-engine run --live   # push for real</code></pre>
             <li><strong>Timezone-aware cadence:</strong> each district's own configured timezone (default America/Chicago) decides which weekday it is, not the host machine's or UTC's.</li>
             <li><strong>Guardrail:</strong> Clever's real 10% deletion pause threshold enforced as a hard block; this engine's own 2% ceiling enforced as a warning; matched enrollment moves netted out; unexplained row loss versus the last real push detected.</li>
             <li><strong>CSV integrity:</strong> a missing required column is now a hard load error, not a silent blank backfill; saves are all-or-nothing across the whole stack; pushes assert stack completeness before uploading.</li>
-            <li><strong>Content generation fix:</strong> generated field "updates" (email, phone, etc.) are now re-rolled until they actually differ from the current value — previously ~62% of predicted contacts.updated events over 26 simulated weeks were silent no-ops.</li>
+            <li><strong>Content generation fix:</strong> generated field "updates" (email, phone, etc.) are now re-rolled until they actually differ from the current value — previously ~62% of predicted users.updated (Contacts) events over 26 simulated weeks were silent no-ops.</li>
             <li><strong>Audit layer:</strong> JSON, Markdown, and history.jsonl reports per run, with scoped credential redaction, a preflight check that logs/ is writable before any work happens, and dry-run output capped at the 5 most recent directories per district.</li>
             <li><strong>Three schema additions:</strong> a Middle name column on students.csv, a Teacher 2 id column on sections.csv, and the entire contacts.csv file — all spec-optional, added because the real export had no mutable surface for three of the six event categories required.</li>
-            <li><strong>Known limitations, documented not hidden:</strong> teacher population has no attrition (breaches scale-sanity in ~7 years); whether Clever emits events for a column going absent&rarr;empty on first sync is unconfirmed; <code>eventing_verified</code> is still false; real paramiko transport is code-reviewed but never executed in this build environment.</li>
+            <li><strong>Fixed (2026-08-03): corrected predicted event type names.</strong> The original build's <code>EventType</code> enum, following project brief §3, included <code>contacts.created</code>/<code>contacts.updated</code>/<code>contacts.deleted</code> and <code>teachers.created</code> — none of these are real Clever Events API wire events. Verified against Clever's live dev docs: contacts, students, teachers, and staff are all <code>users</code> objects in API v3.x; the only real events are <code>users.*</code>/<code>sections.*</code>, with role carried in the object's own <code>roles</code> node. <code>EventType</code> now contains only the six real wire events; a new <code>EventSubject</code> field on <code>Change</code> restores the role breakdown for reporting only (e.g. <code>users.updated (Contacts)</code>). Audit JSON schema bumped to v2.</li>
+            <li><strong>Known limitations, documented not hidden:</strong> teacher population has no attrition (breaches scale-sanity in ~7 years; no longer needs a new EventType, just removal selection logic); <strong>KNOWN BLOCKER</strong> — contacts are very likely the wrong CSV shape (should be columns on students.csv, not a separate contacts.csv — see Event types section above), status BLOCKED pending verification; <code>eventing_verified</code> is still false; real paramiko transport is code-reviewed but never executed in this build environment. <em>Resolved:</em> whether Clever emits events for a column going absent&rarr;empty on first sync — it does not.</li>
             <li><strong>Docs:</strong> README, SCHEMA.md, RUNBOOK.md, this changelog, and this project page.</li>
           </ul>
         </div>

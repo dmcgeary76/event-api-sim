@@ -42,7 +42,7 @@ import pytest
 from drift_engine import config as config_mod
 from drift_engine import runner, schema
 from drift_engine.config import DistrictConfig, EngineConfig, SftpConfig
-from drift_engine.models import Bucket, Change, EventType, Operation, SafetyViolation
+from drift_engine.models import Bucket, Change, EventSubject, EventType, Operation, SafetyViolation
 from drift_engine.runner import RunLockHeld, RunPaths, run_once
 
 #: Passes safety.validate_fingerprint: contains ".", a recognised sandbox
@@ -267,7 +267,8 @@ def _guardrail_violating_changes(stack) -> list[Change]:
             operation=Operation.DELETE,
             key={"Contact id": contact["Contact id"]},
             bucket=Bucket.SMALL_DAILY,
-            expected_event=EventType.CONTACTS_DELETED,
+            expected_event=EventType.USERS_DELETED,
+            event_subject=EventSubject.CONTACT,
             before=dict(contact),
             note="test-induced guardrail violation",
         )
