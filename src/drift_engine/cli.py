@@ -4,7 +4,7 @@
     drift-engine plan --date 2026-08-04   # what would run on a given day
     drift-engine run                      # DRY RUN by default
     drift-engine run --live               # actually push to SFTP
-    drift-engine seed --limit 4000        # stage contacts.csv creation
+    drift-engine seed --limit 4000        # stage guardian-contact seeding
     drift-engine estimate-seed            # how big would a full seed be
     drift-engine history --days 30        # is this working reliably?
     drift-engine simulate-week            # dry-run a whole Mon-Fri locally
@@ -113,7 +113,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="skip the AI content step and use the built-in realistic value pool",
     )
 
-    ss = sub.add_parser("seed", help="create contacts.csv guardian records (staged)")
+    ss = sub.add_parser("seed", help="create guardian contact rows on students.csv (staged)")
     ss.add_argument("--district", default=None)
     ss.add_argument(
         "--limit",

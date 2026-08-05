@@ -75,16 +75,19 @@ class SftpTransferError(RuntimeError):
 class IncompleteStackError(RuntimeError):
     """Raised when ``local_dir`` is missing a required schema file (Fix 6).
 
-    A missing core SIS file (schools/students/teachers/staff/sections/
+    A missing SIS file (schools/students/teachers/staff/sections/
     enrollments.csv) uploaded as a partial stack reads to Clever exactly like
     every one of that file's rows was deleted -- the same mass-deletion
     false signal the guardrail (``guardrail.py``) exists to catch on the
     content side, but here on the transport side, before the guardrail ever
-    runs. ``contacts.csv`` is the one legitimate exception: it is
-    engine-owned and ``CsvStack.save`` never writes it when it has zero
-    rows, so its absence is only an error here when the in-memory ``stack``
-    disagrees (claims contacts rows exist, but the file isn't on disk).
-    Never caught and downgraded -- same posture as ``SafetyViolation``.
+    runs. Never caught and downgraded -- same posture as ``SafetyViolation``.
+
+    There is no longer any exception to this rule. Until 2026-08-05 an absent
+    ``contacts.csv`` was tolerated when the in-memory stack agreed it had zero
+    rows, because that file was engine-owned and only written once it had
+    content. Contacts are now rows on students.csv, which is a real SIS export
+    and must always be present, so every file in ``schema.ALL_SPECS`` is
+    unconditionally required.
     """
 
 
@@ -101,17 +104,11 @@ def _assert_stack_complete(local_dir: Path, stack: CsvStack) -> None:
     success -- see the module-level reproduction in ``IncompleteStackError``.
     """
 
-    counts = stack.counts()
-    missing: list[str] = []
-    for spec in schema.ALL_SPECS:
-        if (local_dir / spec.filename).exists():
-            continue
-        if spec.engine_added and counts.get(spec.record_type, 0) == 0:
-            # Legitimate: an engine-owned file (contacts.csv) with zero rows
-            # is never written by CsvStack.save, so its absence here is
-            # expected, not a partial upload.
-            continue
-        missing.append(spec.filename)
+    missing = [
+        spec.filename
+        for spec in schema.ALL_SPECS
+        if not (local_dir / spec.filename).exists()
+    ]
 
     if missing:
         raise IncompleteStackError(
@@ -119,9 +116,8 @@ def _assert_stack_complete(local_dir: Path, stack: CsvStack) -> None:
             "or push a partial stack -- Clever would read each missing file's "
             "absence as every one of its rows having been deleted. If a file "
             "legitimately has zero rows, it must still exist on disk with just a "
-            "header row; this is only ever skipped for an engine-added file like "
-            "contacts.csv, and only when the in-memory stack agrees it has zero "
-            "rows too."
+            "header row. There are no exceptions to this: every file in "
+            "schema.ALL_SPECS is a real SIS export."
         )
 
 
@@ -169,7 +165,8 @@ def _last_pushed_counts_path(local_dir: Path) -> Path:
     ``run_once``) -- this mirrors ``RunPaths.baseline_counts``
     (``state/<district>/baseline_counts.json``) by writing one directory up,
     alongside it, rather than inside ``current/`` itself (which only ever
-    holds the seven schema CSVs).
+    holds the six schema CSVs -- contacts are rows on students.csv, not a
+    seventh file).
     """
 
     return local_dir.parent / LAST_PUSHED_COUNTS_FILENAME

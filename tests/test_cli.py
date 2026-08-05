@@ -20,6 +20,12 @@ Covers, at minimum (see the audit's Fix 10 checklist):
 * a normal dry run yields exit code 0;
 * cadence/"today" resolution for the ``plan`` command uses a real
   district's own configured timezone (Fix 5).
+
+As in ``tests/test_runner.py``, the synthetic stack here is SIX files: there is
+no contacts.csv, because there is no such file in Clever's SFTP spec. Guardian
+contacts are the contact half of rows on students.csv, so ``n_contacts``
+decides how many student rows carry a populated guardian rather than how many
+rows a seventh file gets. See the ``schema`` module docstring.
 """
 
 from __future__ import annotations
@@ -81,6 +87,41 @@ def _write_csv(path: Path, columns: tuple[str, ...], rows: list[dict[str, str]])
     path.write_text(CRLF.join(lines) + CRLF, encoding="utf-8")
 
 
+def _student_fields(index: int) -> dict[str, str]:
+    """The student-level half of one students.csv row.
+
+    Built once per student and repeated across that student's contact rows by
+    ``schema.expand_contact_rows``, since every row sharing a Student id must
+    carry identical ``schema.STUDENT_LEVEL_COLUMNS``.
+    """
+
+    return {
+        "School id": "SCH1", "Student id": f"STU{index}", "Student number": f"STU{index}",
+        "Last name": f"Last{index}", "First name": f"First{index}", "Grade": "3",
+        "Gender": "F", "DOB": "01/01/2015",
+        "Student email": f"first{index}.last{index}@students.{FINGERPRINT}",
+    }
+
+
+def _contact_fields(n: int) -> dict[str, str]:
+    """The contact half of one students.csv row, for guardian number ``n``.
+
+    ``Contact sis id`` is always populated: ``schema.row_carries_contact`` keys
+    on it, so a row with guardian values but no sis id would not be counted as
+    a contact at all and the guardrail's denominator would be zero.
+    """
+
+    return {
+        "Contact relationship": "Mother",
+        "Contact type": "Parent",
+        "Contact name": f"Guardian {n}",
+        "Contact phone": "9185550000",
+        "Contact phone type": "Mobile",
+        "Contact email": f"guardian{n}@{FINGERPRINT}",
+        "Contact sis id": f"CON{n:03d}",
+    }
+
+
 def _write_baseline_stack(directory: Path, *, n_students: int = 6, n_contacts: int = 4) -> None:
     directory.mkdir(parents=True, exist_ok=True)
 
@@ -127,34 +168,31 @@ def _write_baseline_stack(directory: Path, *, n_students: int = 6, n_contacts: i
     ]
     _write_csv(directory / "sections.csv", schema.SECTIONS.columns, sections)
 
-    students = [
-        {
-            "School id": "SCH1", "Student id": f"STU{i}", "Student number": f"STU{i}",
-            "Last name": f"Last{i}", "First name": f"First{i}", "Grade": "3",
-            "Gender": "F", "DOB": "01/01/2015",
-            "Student email": f"first{i}.last{i}@students.{FINGERPRINT}",
-        }
-        for i in range(1, n_students + 1)
-    ]
-    _write_csv(directory / "students.csv", schema.STUDENTS.columns, students)
+    # Guardians dealt round-robin across the students, then rendered through
+    # ``schema.expand_contact_rows`` -- the single place the row-per-contact
+    # pattern is encoded -- so a student with no guardian keeps exactly one row
+    # with the seven contact columns blank instead of disappearing from the
+    # file. With the defaults: 6 rows, 4 carrying a guardian.
+    contacts_by_student: dict[str, list[dict[str, str]]] = {}
+    for i in range(1, n_contacts + 1):
+        sid = f"STU{((i - 1) % n_students) + 1}"
+        contacts_by_student.setdefault(sid, []).append(_contact_fields(i))
+
+    student_rows: list[dict[str, str]] = []
+    for i in range(1, n_students + 1):
+        student = _student_fields(i)
+        student_rows.extend(
+            schema.expand_contact_rows(
+                student, contacts_by_student.get(student["Student id"], [])
+            )
+        )
+    _write_csv(directory / "students.csv", schema.STUDENTS.columns, student_rows)
 
     enrollments = [
         {"School id": "SCH1", "Section id": "SEC1", "Student id": f"STU{i}"}
         for i in range(1, n_students + 1)
     ]
     _write_csv(directory / "enrollments.csv", schema.ENROLLMENTS.columns, enrollments)
-
-    if n_contacts:
-        contacts = [
-            {
-                "School id": "SCH1", "Student id": f"STU{((i - 1) % n_students) + 1}",
-                "Contact id": f"CON{i:03d}", "Contact name": f"Guardian {i}",
-                "Contact type": "Parent", "Relationship": "Mother", "Phone": "9185550000",
-                "Phone type": "Mobile", "Email": f"guardian{i}@{FINGERPRINT}", "Sequence": "1",
-            }
-            for i in range(1, n_contacts + 1)
-        ]
-        _write_csv(directory / "contacts.csv", schema.CONTACTS.columns, contacts)
 
 
 def _base_args(tmp_path: Path, *extra: str) -> list[str]:
@@ -225,18 +263,26 @@ def test_run_guardrail_blocked_exits_one(tmp_path, monkeypatch):
     )
 
     def _fake_select(stack, plan, content, *, rng):
+        """One guardian removal: a students.csv row DELETE attributed to the
+        ``contacts`` record type via ``event_subject``. 1 of the fixture's 4
+        contacts is 25%, past Clever's 10% pause threshold, so the guardrail
+        blocks -- an ordinary run failure (exit 1), not a safety violation."""
+
         from drift_engine.models import Bucket, Change, EventSubject, EventType, Operation
 
         contact = stack.contacts()[0]
         return [
             Change(
-                filename=schema.CONTACTS.filename,
+                filename=schema.STUDENTS.filename,
                 operation=Operation.DELETE,
-                key={"Contact id": contact["Contact id"]},
+                key={
+                    "Student id": contact["Student id"],
+                    schema.CONTACT_SIS_ID_COLUMN: contact[schema.CONTACT_SIS_ID_COLUMN],
+                },
                 bucket=Bucket.SMALL_DAILY,
                 expected_event=EventType.USERS_DELETED,
                 event_subject=EventSubject.CONTACT,
-                before=dict(contact),
+                before=schema.contact_fields(contact),
                 note="forced guardrail violation for exit-code test",
             )
         ]

@@ -31,7 +31,7 @@ from typing import Any, Mapping, Sequence
 
 from . import schema
 from .csvstack import CsvStack
-from .models import Change, GuardrailViolation, Operation
+from .models import Change, EventSubject, EventType, GuardrailViolation, Operation
 
 __all__ = [
     "CLEVER_PAUSE_THRESHOLD",
@@ -198,6 +198,150 @@ def _record_type_for(filename: str) -> str:
     return spec.record_type if spec is not None else filename
 
 
+def _attributed_record_type(change: Change) -> str:
+    """Which record type ``change`` should be COUNTED against.
+
+    Not simply its filename's record type, because contacts live as rows on
+    students.csv (see the ``schema`` module docstring). A guardian removal is
+    a students.csv row delete, and attributing it by filename alone would:
+
+    * inflate the *students* deletion ratio with routine guardian churn,
+      walking it toward Clever's 10% pause threshold for no real reason, and
+    * camouflage a genuine student deletion inside that same noise, which is
+      the failure that actually matters.
+
+    So a change whose ``event_subject`` is CONTACT counts against
+    ``contacts``, and only a change genuinely about the student counts against
+    ``students``. Keying on the predicted Clever-level effect rather than the
+    CSV operation is deliberate: for contacts the two legitimately diverge
+    (filling a blank row is a CSV UPDATE but a contact CREATE to Clever).
+    """
+
+    if (
+        change.filename == schema.STUDENTS.filename
+        and change.event_subject is EventSubject.CONTACT
+    ):
+        return schema.CONTACTS_RECORD_TYPE
+    return _record_type_for(change.filename)
+
+
+def _is_effective_create(change: Change) -> bool:
+    """True when ``change`` brings a record into existence for Clever.
+
+    Usually an ``Operation.CREATE``. The exception is a contact added to a
+    student who had none: that fills the student's existing blank row, so the
+    CSV operation is an UPDATE while the Clever-level effect is a brand new
+    guardian object. Counting only CSV CREATEs would undercount creations
+    during seeding, when almost every contact arrives this way.
+    """
+
+    if change.operation is Operation.CREATE:
+        return True
+    return change.operation is Operation.UPDATE and change.expected_event in (
+        EventType.USERS_CREATED,
+        EventType.SECTIONS_CREATED,
+    )
+
+
+def _is_effective_delete(change: Change) -> bool:
+    """True when ``change`` removes a record as far as Clever is concerned.
+
+    Usually an ``Operation.DELETE``. The mirror of the case above is an UPDATE
+    that blanks a contact's columns in place -- the only correct way to remove
+    the last guardian from a student, since deleting that row would delete the
+    student too. ``selection.py`` never does this today (it refuses to remove
+    a student's final contact at all), but the accounting handles it so a
+    future change to that rule cannot quietly slip past the guardrail.
+    """
+
+    if change.operation is Operation.DELETE:
+        return True
+    return change.operation is Operation.UPDATE and change.expected_event in (
+        EventType.USERS_DELETED,
+        EventType.SECTIONS_DELETED,
+    )
+
+
+def _move_identity(record_type: str, change: Change) -> tuple[str, ...]:
+    """The identity a DELETE and a CREATE must share to count as one move.
+
+    For enrollments -- the only genuine move this engine produces -- that is
+    the ``Student id``: the row's key is (Section id, Student id) and it is the
+    *Section id* that changes across the pair, so the student is what anchors
+    "same record, new parent".
+
+    Contacts need the guardian's own ``Contact sis id`` in the identity as
+    well, and leaving it out was a bug. A contact cannot move: every guardian
+    this engine creates gets a freshly minted sis id (see
+    ``schema.CONTACT_SIS_ID_COLUMN``), so a CREATE is never "the same contact
+    arriving somewhere else". Anchoring on the Student id alone meant that
+    removing guardian A from a student while adding unrelated guardian B to
+    that SAME student in one run matched as a move and netted the removal
+    away -- and ``selection.py`` picks its addition and removal targets from
+    two independently shuffled pools, so nothing stops one student appearing in
+    both. That reproduced, for that student, precisely the invisible-contact-
+    attrition failure identity matching was introduced to fix; it was just
+    narrowed from "any student" to "the same student".
+
+    Including the sis id rather than special-casing contacts out of netting
+    keeps the rule general: if some future change ever deletes and re-creates a
+    row carrying the SAME sis id (genuinely the same guardian, relocated within
+    the file), that is a real no-op and still nets correctly.
+    """
+
+    identity = (record_type, change.key.get("Student id", ""))
+    if record_type == schema.CONTACTS_RECORD_TYPE:
+        identity += (change.key.get(schema.CONTACT_SIS_ID_COLUMN, ""),)
+    return identity
+
+
+def _count_matched_moves(changes: Sequence[Change]) -> dict[str, int]:
+    """Per record type, how many DELETEs are part of a genuine MOVE.
+
+    A move is one record leaving one parent and arriving at another -- the
+    enrollment section change selection.py emits as a DELETE of
+    (old section, student) plus a CREATE of (new section, student). Netting
+    those is correct: the record still exists, so it is not attrition, and on
+    a small stack a single move could otherwise trip the ratio purely from a
+    tiny denominator.
+
+    Matching is therefore on shared record IDENTITY -- same record type and
+    same ``Student id`` -- not merely "this record type had some creates and
+    some deletes in the same run". The looser count is what the previous
+    implementation used, and it silently defeated the contacts guardrail: a
+    Tue/Thu run adds up to ``BIG_STUDENT_CONTACTS_ADDED`` (4) guardians and
+    removes ``BIG_STUDENT_CONTACTS_REMOVED`` (2), so ``min(2, 4) == 2``
+    netted every contact deletion away to zero and the guardrail could never
+    report contact attrition at all. Adding guardian A to one student does not
+    offset removing guardian B from a different student; they are unrelated
+    records. Nor does adding guardian B to the SAME student offset it -- see
+    :func:`_move_identity`, which is what decides how much has to match.
+    """
+
+    deletes: dict[tuple[str, ...], int] = {}
+    creates: dict[tuple[str, ...], int] = {}
+    for change in changes:
+        record_type = _attributed_record_type(change)
+        identity = _move_identity(record_type, change)
+        if _is_effective_delete(change):
+            deletes[identity] = deletes.get(identity, 0) + 1
+        elif _is_effective_create(change):
+            creates[identity] = creates.get(identity, 0) + 1
+
+    matched: dict[str, int] = {}
+    for identity, delete_count in deletes.items():
+        record_type, student_id = identity[0], identity[1]
+        if not student_id:
+            # No student to anchor identity on, so "moved" is not a claim this
+            # function can make. Treated as attrition, which is the safe
+            # direction: it can over-report deletions, never under-report.
+            continue
+        pairs = min(delete_count, creates.get(identity, 0))
+        if pairs:
+            matched[record_type] = matched.get(record_type, 0) + pairs
+    return matched
+
+
 def evaluate(
     stack: CsvStack,
     changes: Sequence[Change],
@@ -224,17 +368,24 @@ def evaluate(
     * ``ratio > SAFE_THRESHOLD`` -> ``warn``.
     * otherwise -> ``ok``.
 
+    Record types are attributed by :func:`_attributed_record_type`, not by
+    filename -- contacts are rows on students.csv, so a guardian removal must
+    count against ``contacts``, never against ``students``.
+
     The effective deletion count is the raw ``Operation.DELETE`` count for
     that record type, adjusted two ways:
 
-    * Fix 4 (matched moves are not attrition): any CREATE for the SAME
-      record type in the SAME run is netted against the deletes first (e.g.
-      selection.py's enrollment section move is always a DELETE of the old
+    * Fix 4 (matched moves are not attrition): a DELETE that pairs with a
+      CREATE of the SAME record identity in the SAME run is netted out first
+      (selection.py's enrollment section move is a DELETE of the old
       (Section id, Student id) row plus a CREATE of the new one -- Clever's
       row-level diff sees both, but this is not the mass-deletion pattern
       the threshold exists to catch, and on a small stack a single matched
       move could otherwise trip the ratio purely from a tiny denominator).
-      Deletes left over after netting are genuine and counted in full.
+      Matching is on shared identity, not merely "same record type had both
+      creates and deletes" -- see ``_count_matched_moves`` for why that looser
+      rule silently zeroed out every contact deletion. Deletes left over after
+      netting are genuine and counted in full.
     * Fix 3 (truncation outside this engine is not invisible): when the
       caller supplies ``last_pushed_counts`` -- the record counts as of the
       last successful real push, see ``sftp_push.read_last_pushed_counts``/
@@ -265,18 +416,20 @@ def evaluate(
     deletes_by_type: dict[str, int] = {}
     creates_by_type: dict[str, int] = {}
     for change in changes:
-        record_type = _record_type_for(change.filename)
-        if change.operation is Operation.DELETE:
+        record_type = _attributed_record_type(change)
+        if _is_effective_delete(change):
             deletes_by_type[record_type] = deletes_by_type.get(record_type, 0) + 1
-        elif change.operation is Operation.CREATE:
+        elif _is_effective_create(change):
             creates_by_type[record_type] = creates_by_type.get(record_type, 0) + 1
 
-    # Fix 4: net matched CREATE/DELETE pairs per record type before anything
-    # else touches the deletion count -- see the docstring above.
-    moves_netted_by_type: dict[str, int] = {}
+    # Fix 4: net genuine MOVES (same record identity out and back in) per
+    # record type before anything else touches the deletion count -- see
+    # ``_count_matched_moves``, which is identity-matched precisely so this
+    # cannot cancel out unrelated contact churn.
+    moves_netted_by_type = _count_matched_moves(changes)
     net_deletes_by_type: dict[str, int] = {}
     for record_type, raw_deletes in deletes_by_type.items():
-        matched = min(raw_deletes, creates_by_type.get(record_type, 0))
+        matched = min(raw_deletes, moves_netted_by_type.get(record_type, 0))
         moves_netted_by_type[record_type] = matched
         net_deletes_by_type[record_type] = raw_deletes - matched
 

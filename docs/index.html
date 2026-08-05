@@ -217,23 +217,76 @@
           <tr><td><code>sections.updated</code></td><td>Sections</td><td>Big-student enrollment moves; big-teacher co-teacher/primary-teacher changes</td></tr>
         </tbody>
       </table>
-      <div class="card" style="margin-top:1rem; border-color: var(--red);">
-        <h3 style="color: var(--red);">KNOWN BLOCKER — contacts.csv is very likely the wrong shape</h3>
-        <p class="muted" style="margin:0;">
-          Per Clever's SIS CSV docs, contacts shared over SFTP are columns
-          <strong>on <code>students.csv</code></strong>
-          (<code>contact_name</code>, <code>contact_type</code>,
-          <code>contact_relationship</code>, <code>contact_phone</code>,
-          <code>contact_phone_type</code>, <code>contact_email</code>,
-          <code>contact_sis_id</code>, up to 5 per student) — <strong>not</strong>
-          a separate <code>contacts.csv</code> file. This engine currently
-          writes a separate file, which Clever will most likely ignore. A
-          contact's Clever id is also only stable when <code>contact_sis_id</code>
-          is populated; otherwise an email edit reads as a delete+create, not
-          an update. <strong>Status: BLOCKED</strong> pending David verifying
-          the CSV spec his sandbox actually accepts — deliberately not
-          implemented speculatively. See <code>docs/SCHEMA.md</code>.
+      <div class="card" style="margin-top:1rem; border-color: var(--green);">
+        <h3 style="color: var(--green);">Resolved 2026-08-05 -- contacts are rows on students.csv</h3>
+        <p class="muted" style="margin:0 0 .7rem;">
+          This was carried for weeks as a KNOWN BLOCKER, and it was a real
+          one. It has now been <strong>verified and fixed</strong>, not
+          assumed away. Authority: Clever's official
+          <strong>SFTP Instructions, v2.1.1 (Dec 2025)</strong>, confirmed by
+          David on 2026-08-05 against the standard SFTP allowable-fields
+          list. Coverage on contacts from Clever's internal answer bot was
+          thin, so the current PDF is treated as authoritative over general
+          memory.
         </p>
+        <ul class="plain">
+          <li>
+            There is <strong>no standalone <code>contacts.csv</code></strong>.
+            Guardian contacts are columns on <code>students.csv</code>:
+            <code>Contact relationship</code>, <code>Contact type</code>,
+            <code>Contact name</code>, <code>Contact phone</code>,
+            <code>Contact phone type</code>, <code>Contact email</code>,
+            <code>Contact sis id</code> -- unsuffixed and singular.
+          </li>
+          <li>
+            Multiple contacts are <strong>multiple rows for the same
+            <code>Student id</code></strong>, quoting v2.1.1: <em>"In order to
+            provide multiple parent/guardian contacts, you may create multiple
+            rows for a single student with different contact
+            information."</em> Maximum 5 per student, no custom mappings.
+          </li>
+          <li>
+            There is <strong>no <code>contact_name_2</code> /
+            <code>contact_email_2</code> convention</strong> -- those headers
+            are not real. Do not conflate this with <code>sections.csv</code>,
+            which in the same spec genuinely <em>does</em> use
+            <code>Teacher 2 id</code>..<code>Teacher 10 id</code> for
+            co-teachers. Sections widen; contacts repeat.
+          </li>
+          <li>
+            <code>Contact sis id</code> governs identity stability. With one, a
+            contact keeps its Clever id across phone/email/name changes;
+            without one, Clever derives the id from name+email (else
+            name+phone, else name+type+relationship+phone type), so an email
+            edit changes the identity key itself and reads as
+            delete-then-create rather than <code>users.updated</code>. When
+            IDEA Public Schools added <code>contact_sis_id</code>, Clever's PE
+            team confirmed every existing contact id would change -- there is
+            no id-preservation path once the identity basis shifts.
+          </li>
+          <li>
+            Engine response: every contact it creates gets a minted, permanent
+            <code>Contact sis id</code> that is never edited;
+            <code>students.csv</code>'s key is now
+            <code>(Student id, Contact sis id)</code>; a student with no
+            contacts keeps one blank-contact row, and their first guardian
+            fills it in place (a CSV <code>UPDATE</code> that is a contact
+            <code>CREATE</code> to Clever); student-level edits fan out across
+            sibling rows; <code>counts()</code> reports distinct students plus
+            a derived contacts count; the guardrail attributes contact-row
+            deletes to <code>contacts</code>, not <code>students</code>. All
+            row expansion goes through one function,
+            <code>schema.expand_contact_rows</code>, so a future spec
+            correction is a one-function change.
+          </li>
+          <li class="muted">
+            Partner-facing footnote: on the SIS-managed auto-sync side,
+            <code>contact.sis_id</code> is only honored for Infinite Campus,
+            IC OneRoster API, Skyward, and Skyward API. Irrelevant to an SFTP
+            sandbox, but it matters if a partner compares sandbox behaviour to
+            a real auto-synced district.
+          </li>
+        </ul>
       </div>
     </section>
 
@@ -307,14 +360,17 @@
       <div class="card">
         <div class="status-grid">
           <div class="status-item"><span class="status-label">Version</span><span><span class="pill p-blue">v0.1.0</span></span></div>
-          <div class="status-item"><span class="status-label">Test suite</span><span><span class="pill p-green">222 passed</span> · 2 skipped (paramiko host-key tests, no PyPI in build sandbox)</span></div>
+          <div class="status-item"><span class="status-label">Test suite</span><span><span class="pill p-green">249 passed</span> · 2 skipped (paramiko host-key tests, no PyPI in build sandbox)</span></div>
           <div class="status-item"><span class="status-label">Dry-run verification</span><span>Verified against the real sandbox stack — 69 schools, 33,621 students, 1,866 teachers, 280 staff, 4,504 sections, 104,031 enrollments</span></div>
           <div class="status-item"><span class="status-label">Simulated week (seed 42)</span><span>~58 changes across Mon–Fri; a 4-week run produced all six event/role combinations, worst deletion ratio ~0% against the 10% pause threshold</span></div>
           <div class="status-item"><span class="status-label">Pending: eventing verification</span><span><span class="pill p-amber">Open</span> — Secure Sync / district-app token eventing not yet confirmed active for the target district (brief §9); <code>eventing_verified: false</code></span></div>
-          <div class="status-item"><span class="status-label">KNOWN BLOCKER: contacts.csv shape</span><span><span class="pill p-red">Blocked</span> — contacts likely belong on students.csv, not a separate file; pending David verifying the CSV spec his sandbox accepts; see Event types section above</span></div>
-          <div class="status-item"><span class="status-label">Pending: staged contacts seeding</span><span><span class="pill p-amber">Open</span> — 33,621 students with 0 contacts; staged plan is ~4,000 students/run over ~9 runs; blocked on the item above first</span></div>
+          <div class="status-item"><span class="status-label">Resolved: contacts CSV shape</span><span><span class="pill p-green">Resolved</span> -- the blocker was real; confirmed against SFTP Instructions v2.1.1 (Dec 2025) on 2026-08-05 and the engine reworked to rows-on-students.csv; see Event types section above</span></div>
+          <div class="status-item"><span class="status-label">Verified: staged seed dry run</span><span><span class="pill p-green">Verified</span> -- <code>seed --limit 4000</code> produced 6,771 contacts across 4,000 students, taking students.csv to 36,392 rows while <code>counts()["students"]</code> stayed 33,621; scale sanity passed</span></div>
+          <div class="status-item"><span class="status-label">Verified: three days of drift</span><span><span class="pill p-green">Verified</span> -- after a full 52,819-contact seed: Mon 6 users.updated (Contacts) + 4 (Students); Tue 8 sections.updated, 3 users.created (Contacts), 2 users.deleted (Contacts) attributed to <code>contacts</code> at 0.0038%; Fri 3 sections.updated + 1 users.created (Teachers). Zero sibling-row disagreements, zero students over the 5-contact cap, zero orphaned students, all 52,820 Contact sis id values unique</span></div>
+          <div class="status-item"><span class="status-label">Pending: staged contacts seeding</span><span><span class="pill p-amber">Open</span> -- not yet run live; 33,621 students with 0 contacts, staged plan ~4,000 students/run over ~9 runs</span></div>
           <div class="status-item"><span class="status-label">Resolved: column-addition burst</span><span><span class="pill p-green">Resolved</span> — absent&rarr;empty columns do not produce a users.updated/sections.updated burst; Clever's diff only fires on an actual value change</span></div>
           <div class="status-item"><span class="status-label">Known limitation: teacher growth</span><span><span class="pill p-amber">Deferred</span> — +1 teacher/week with no attrition; breaches the 25% scale-sanity ceiling in ~7 years; no longer needs a new EventType (users.deleted already exists), just removal selection logic</span></div>
+          <div class="status-item"><span class="status-label">Known limitation: contacts never scale-checked</span><span><span class="pill p-amber">Open</span> -- <code>assert_scale_sane</code> skips any record type whose baseline is 0, and <code>baseline_counts.json</code> is written once and never re-anchored, so this district's <code>contacts: 0</code> is baked in. Deletion protection is unaffected (the 10% per-run guardrail still applies); adding a post-seed re-baseline should be a deliberate decision, not a side effect</span></div>
           <div class="status-item"><span class="status-label">Untested: real paramiko transport</span><span><span class="pill p-amber">Code-reviewed only</span> — not installable in this build environment; watch the first live push closely</span></div>
         </div>
       </div>
@@ -358,9 +414,10 @@ drift-engine run --live   # push for real</code></pre>
             <li><strong>CSV integrity:</strong> a missing required column is now a hard load error, not a silent blank backfill; saves are all-or-nothing across the whole stack; pushes assert stack completeness before uploading.</li>
             <li><strong>Content generation fix:</strong> generated field "updates" (email, phone, etc.) are now re-rolled until they actually differ from the current value — previously ~62% of predicted users.updated (Contacts) events over 26 simulated weeks were silent no-ops.</li>
             <li><strong>Audit layer:</strong> JSON, Markdown, and history.jsonl reports per run, with scoped credential redaction, a preflight check that logs/ is writable before any work happens, and dry-run output capped at the 5 most recent directories per district.</li>
-            <li><strong>Three schema additions:</strong> a Middle name column on students.csv, a Teacher 2 id column on sections.csv, and the entire contacts.csv file — all spec-optional, added because the real export had no mutable surface for three of the six event categories required.</li>
+            <li><strong>Three schema additions:</strong> a Middle name column on students.csv, a Teacher 2 id column on sections.csv, and guardian contact columns -- all spec-optional, added because the real export had no mutable surface for three of the six event categories required. (The contact columns originally shipped as a standalone contacts.csv; corrected 2026-08-05, see below.)</li>
             <li><strong>Fixed (2026-08-03): corrected predicted event type names.</strong> The original build's <code>EventType</code> enum, following project brief §3, included <code>contacts.created</code>/<code>contacts.updated</code>/<code>contacts.deleted</code> and <code>teachers.created</code> — none of these are real Clever Events API wire events. Verified against Clever's live dev docs: contacts, students, teachers, and staff are all <code>users</code> objects in API v3.x; the only real events are <code>users.*</code>/<code>sections.*</code>, with role carried in the object's own <code>roles</code> node. <code>EventType</code> now contains only the six real wire events; a new <code>EventSubject</code> field on <code>Change</code> restores the role breakdown for reporting only (e.g. <code>users.updated (Contacts)</code>). Audit JSON schema bumped to v2.</li>
-            <li><strong>Known limitations, documented not hidden:</strong> teacher population has no attrition (breaches scale-sanity in ~7 years; no longer needs a new EventType, just removal selection logic); <strong>KNOWN BLOCKER</strong> — contacts are very likely the wrong CSV shape (should be columns on students.csv, not a separate contacts.csv — see Event types section above), status BLOCKED pending verification; <code>eventing_verified</code> is still false; real paramiko transport is code-reviewed but never executed in this build environment. <em>Resolved:</em> whether Clever emits events for a column going absent&rarr;empty on first sync — it does not.</li>
+            <li><strong>Fixed (2026-08-05): contacts are rows on students.csv, not a separate file.</strong> The KNOWN BLOCKER previously recorded here was real: this engine wrote a standalone <code>contacts.csv</code>, which Clever's SFTP ingest has no concept of, so none of its predicted contact events would ever have fired. Confirmed against Clever's official <strong>SFTP Instructions, v2.1.1 (Dec 2025)</strong> on 2026-08-05 against the standard allowable-fields list, then fixed. Guardian contacts are now the seven unsuffixed <code>Contact *</code> columns on <code>students.csv</code>, with multiple contacts expressed as multiple rows per <code>Student id</code> (max 5); <code>students.csv</code>'s key is <code>(Student id, Contact sis id)</code>; every engine-created contact gets a minted, permanent <code>Contact sis id</code> so field edits surface as <code>users.updated (Contacts)</code>; a student with no contacts keeps one blank-contact row and their first guardian fills it in place; student-level edits fan out across sibling rows; <code>CsvStack.counts()</code> reports distinct students plus a derived contacts count (a raw row count would have tripped the 25% scale gate mid-seed); the guardrail attributes contact-row deletes to <code>contacts</code>, not <code>students</code>; <code>FileSpec.engine_added</code> was removed and all six files in <code>schema.ALL_SPECS</code> are unconditionally required. Two latent source bugs were fixed in passing: <code>CsvStack.apply</code> deleted rows by a stale index when one batch held two deletes on the same file, and the guardrail's move-netting was loose enough to net every contact deletion away to zero.</li>
+            <li><strong>Known limitations, documented not hidden:</strong> teacher population has no attrition (breaches scale-sanity in ~7 years; no longer needs a new EventType, just removal selection logic); <code>eventing_verified</code> is still false; real paramiko transport is code-reviewed but never executed in this build environment; contacts are never scale-checked, because <code>assert_scale_sane</code> skips a record type whose baseline is 0 and <code>baseline_counts.json</code> is written once and never re-anchored (deletion protection is unaffected -- the 10% per-run guardrail still applies). <em>Resolved:</em> whether Clever emits events for a column going absent&rarr;empty on first sync -- it does not; and whether contacts belong in their own CSV -- they do not, see above.</li>
             <li><strong>Docs:</strong> README, SCHEMA.md, RUNBOOK.md, this changelog, and this project page.</li>
           </ul>
         </div>

@@ -10,7 +10,7 @@ and test against.
 > This engine must **never** be pointed at a production district or a
 > production SFTP endpoint. That is a hard constraint enforced in code
 > (`src/drift_engine/safety.py`), not just a config default — see
-> [Safety model](#safety-model) below. Adding a new SFTP username to
+> [Safety model](#safety-model-in-plain-terms) below. Adding a new SFTP username to
 > `config/districts.yml` is a deliberate, reviewed act, not a formality.
 
 ## What it does, and why
@@ -97,31 +97,111 @@ Audit finding: ~62% of predicted `users.updated (Contacts)` events over 26
 simulated weeks were silent no-ops on the Email field. Measured after the
 fix: 0% no-op rate across every updated field.
 
-### KNOWN BLOCKER — contacts are not a separate CSV on Clever's real SFTP feed
+### Confirmed, then fixed: contacts are rows on students.csv, not a separate CSV
 
-**Status: BLOCKED, not yet fixed — do not assume this engine's `contacts.csv`
-is correct.** Per Clever's SIS CSV documentation
-([Contacts & guardians](https://dev.clever.com/docs/contacts-guardians)),
-contacts shared over SFTP are **not** their own `contacts.csv` file. They are
-a fixed set of columns **on `students.csv` itself** —
-`contact_name`, `contact_type`, `contact_relationship`, `contact_phone`,
-`contact_phone_type`, `contact_email`, `contact_sis_id` — repeated up to
-**5 times per student** (`contact_name_2`, `contact_email_2`, etc.). This
-engine currently writes a **separate `contacts.csv`**, which Clever will most
-likely simply ignore, meaning none of this engine's predicted
-`users.created`/`users.updated`/`users.deleted` (Contacts) events would
-actually fire against a real sandbox ingest.
+**Status: RESOLVED 2026-08-05.** This was recorded here for weeks as a KNOWN
+BLOCKER, and it was a real one -- it has now been *verified* and then fixed,
+not assumed away. Earlier versions of this engine wrote a standalone
+`contacts.csv`. No such file exists in Clever's SFTP spec, so it would have
+been ignored (or rejected as unknown columns) on ingest, and not one of this
+engine's predicted `users.created`/`users.updated`/`users.deleted` (Contacts)
+events would ever have fired against a real sandbox.
 
-A second, related wrinkle for whenever this is picked up: a contact's Clever
-ID is only stable across syncs when `contact_sis_id` is populated on that
-student row. Without it, Clever derives the contact's identity from
-name+email, so something as small as an email correction reads to Clever as
-a **delete-then-create of a whole new contact**, not an update — the exact
-opposite of what a "contact field edit" is meant to demonstrate.
+Verified against Clever's official **SFTP Instructions, v2.1.1 (Dec 2025)**,
+confirmed by David on 2026-08-05 against the standard SFTP allowable-fields
+list. Coverage on contacts from Clever's internal answer bot was thin, so the
+current PDF is treated as authoritative over general memory. Every spec claim
+below and in [docs/SCHEMA.md](docs/SCHEMA.md) is cited to that version inline,
+so a future reader can always tell a spec fact from one of our inferences.
 
-This is explicitly **deferred** — do not implement the `students.csv`-column
-rework without David first verifying which CSV shape his actual sandbox
-SFTP endpoint accepts. Tracked here so it is not silently forgotten.
+**What the spec says:**
+
+- Guardian contacts are **columns on `students.csv`**: `Contact
+  relationship`, `Contact type`, `Contact name`, `Contact phone`, `Contact
+  phone type`, `Contact email`, `Contact sis id`. Unsuffixed and singular --
+  exactly one contact's worth of columns (SFTP Instructions v2.1.1).
+- Multiple contacts are expressed as **multiple rows for the same `Student
+  id`**. Quoting v2.1.1 directly: *"In order to provide multiple
+  parent/guardian contacts, you may create multiple rows for a single student
+  with different contact information."* At most **5 contacts per student**,
+  with no custom mappings supported.
+- There is **no `contact_name_2` / `contact_email_2` column convention.**
+  Those headers are not real and would be dropped or rejected. Do not
+  conflate this with `sections.csv`, which in the *same* spec genuinely does
+  use numbered suffixes (`Teacher 2 id` through `Teacher 10 id`) for
+  co-teachers. Two different patterns in one document: sections widen,
+  contacts repeat. That is easy to conflate in either direction, so it is
+  called out in `schema.py` next to both definitions as well as here.
+- `Contact sis id` governs a contact's **identity stability**. *With* one, the
+  contact keeps the same Clever id across phone, email, and name changes;
+  only the sis id itself changing changes the Clever id. *Without* one, Clever
+  derives the id from name+email, else name+phone, else name+contact
+  type+relationship+phone type -- so editing an email changes the identity key
+  itself, and the ingest reads it as a delete-then-create of a different
+  contact rather than a `users.updated`. That is the exact opposite of what a
+  "contact field edit" is meant to demonstrate.
+- Real-world confirmation: when IDEA Public Schools added `contact_sis_id` to
+  their file, Clever's PE team confirmed that **every existing contact's
+  Clever id would change**, because there is no id-preservation path once the
+  identity basis shifts. The sis id has to be present from the first push,
+  not bolted on later.
+- Partner-facing footnote: on the SIS-managed auto-sync side, `contact.sis_id`
+  is only honored for **Infinite Campus, IC OneRoster API, Skyward, and
+  Skyward API**. Irrelevant to an SFTP sandbox, but it matters the moment a
+  partner compares this sandbox's contact behaviour against a real
+  auto-synced district's.
+
+**What the engine now does about it** (all implemented, all covered by tests):
+
+- **Every contact this engine creates gets a minted, permanent `Contact sis
+  id`, and the engine never edits it** -- that column is deliberately absent
+  from `STUDENTS.mutable`. Seeded contacts use `SEED<student id>-<n>`;
+  drift-added ones use `CON######`. This is the single thing that makes a
+  contact email/phone edit surface as `users.updated (Contacts)` instead of a
+  delete-then-create pair.
+- **A student with no contacts occupies exactly one row**, with the contact
+  columns blank -- dropping the row entirely would delete the student. Adding
+  their first guardian **fills that row in place**: a CSV `UPDATE` that is a
+  contact CREATE to Clever. Every guardian after that is a new row
+  (`CREATE`). Removing a guardian deletes that row, and selection **refuses
+  to remove a student's last contact**, because that row is also the
+  student's last row.
+- **`students.csv`'s natural key is now `(Student id, Contact sis id)`.**
+  `Student id` alone is no longer unique.
+- **Student-level column edits fan out to every row sharing a `Student id`**,
+  so a student never presents conflicting values inside one file.
+- **`CsvStack.counts()` reports `students` as a DISTINCT student count** and
+  adds a derived `contacts` count. This is load-bearing, not cosmetic:
+  seeding takes `students.csv` from 33,621 rows to ~52,900, a **+57%** move
+  that as a raw row count would blow straight through
+  `safety.MAX_SCALE_DRIFT` (25%) -- and because a stale baseline is a hard
+  `SafetyViolation` rather than a silent re-anchor, that would have bricked
+  the district mid-seed.
+- **The guardrail attributes a `students.csv` row delete to `contacts`** when
+  the change is about a contact, and only to `students` otherwise. Without
+  that, routine guardian churn would inflate the student deletion ratio
+  toward Clever's 10% threshold and camouflage a genuine student deletion
+  behind the noise.
+- **`schema.expand_contact_rows(student, contacts)` is the one function that
+  encodes the row-per-contact pattern.** Given how thin the available
+  contacts coverage is, that is the deliberate hedge: if the spec turns out
+  to vary, correcting that function is the whole change.
+- **`FileSpec.engine_added` is gone.** Every file in `schema.ALL_SPECS` (now
+  **six**, not seven) is unconditionally required on disk, and `save()`
+  always writes each one even with zero rows. The "this file may legitimately
+  be absent" escape hatch only ever existed for `contacts.csv`.
+
+Two source bugs were found and fixed while doing this work, both latent before
+the rework:
+
+- `CsvStack.apply` deleted rows by a **stale index** when one batch contained
+  two deletes against the same file, so the second delete could silently take
+  out an innocent bystander row.
+- The guardrail's **move-netting was loose enough to be self-defeating**:
+  adding a guardian to the same student you removed one from netted the
+  removal away to zero, so contact attrition could never be reported at all.
+  Netting now includes the `Contact sis id`, because a contact cannot "move"
+  -- a CREATE is never the same contact as a DELETE.
 
 ### Resolved: the absent → empty column question is no longer an open risk
 
@@ -134,6 +214,12 @@ it detects a change **on the object** (surfaced via `previous_attributes`),
 and a column going from *absent-from-the-header* to *present-but-empty* is
 not a value change on any existing student/section — there is nothing for
 Clever's diff to see. No first-sync burst is expected from this alone.
+
+The same reasoning covers the seven `Contact *` columns, which are engine-added
+on `students.csv` in exactly the same way: on the first save they appear in the
+header, blank on every student row, and a student with no guardians keeps their
+single row with those columns empty. Contact events only start once a `seed` or
+drift run actually puts a guardian into one of those rows.
 
 ## Quickstart
 
@@ -169,7 +255,7 @@ and `-v/--verbose` at the top level. Full command list from `drift-engine
 | `schedule` | Print the fixed weekly cadence table. |
 | `plan --date YYYY-MM-DD` | Show which bucket(s) apply on a given date (defaults to today). |
 | `run [--district ID] [--live] [--force] [--seed N] [--canned-content]` | Execute a drift run. Dry run unless `--live`. `--force` runs the bucket logic even on a weekend (still subject to the guardrail and safety gates). `--seed` makes the run reproducible. |
-| `seed [--district ID] [--limit N=4000] [--live] [--seed N] [--canned-content]` | Create baseline `contacts.csv` guardian records for students that have none, `--limit` students at a time. See [docs/RUNBOOK.md](docs/RUNBOOK.md) for why this must be staged. |
+| `seed [--district ID] [--limit N=4000] [--live] [--seed N] [--canned-content]` | Create baseline guardian contact rows on `students.csv` for students that have none, `--limit` students at a time. See [docs/RUNBOOK.md](docs/RUNBOOK.md) for why this must be staged. |
 | `estimate-seed [--district ID]` | Report how many `users.created (Contacts)` events an unbounded seed pass would generate — read-only, no writes. |
 | `history [--district ID] [--days N=30]` | Summarise recent runs from `logs/<district>/history.jsonl` (runs per weekday, cumulative event counts, failures, AI-vs-canned trend). |
 | `simulate-week [--district ID] [--start YYYY-MM-DD] [--seed N=1234]` | Dry-run a full Mon–Fri locally, in memory, to preview a week of activity without touching persistent state. |
@@ -247,7 +333,13 @@ written to the audit log first, then re-raised (see
    corrupt `baseline_counts.json` is a hard `SafetyViolation` on any run
    after the district's genuine first run — not a warning-and-skip — unless
    there is no baseline file *and* no record of a prior successful push,
-   which is the one legitimate "first run ever" case.
+   which is the one legitimate "first run ever" case. Note the counts being
+   compared are **distinct students** and a **derived contacts count**, not
+   raw row counts (`CsvStack.counts()`) -- without that, seeding's +57% growth
+   in `students.csv` rows would trip this gate mid-seed. Note also that any
+   record type whose *baseline* is `0` is skipped entirely, which for this
+   district permanently excludes `contacts` -- see limitation 4 under
+   [Known limitations](#known-limitations).
 5. **Production-marker tripwire (advisory).** The district id, username, and
    remote directory are checked for the substrings `prod`, `production`, or
    `live`. This is a cheap belt-and-braces check, not the real gate — the
@@ -318,8 +410,16 @@ use a fixed, documented exit-code contract:
   have loaded anyway with that column blanked on every row and been pushed
   back out that way (the specific bug found in audit: a truncated
   `students.csv` export would have blanked all 33,621 students' email
-  addresses). See [docs/RUNBOOK.md](docs/RUNBOOK.md) for what this means
+  addresses). It also raises on an **unrecognized** column, since silently
+  dropping a column this engine does not understand would lose that data on
+  the next save. See [docs/RUNBOOK.md](docs/RUNBOOK.md) for what this means
   when dropping in a new CSV export.
+- **Every file in `schema.ALL_SPECS` is required, unconditionally.** There is
+  no longer a `FileSpec.engine_added` flag letting a file be legitimately
+  absent on load -- that only ever existed for the removed `contacts.csv`, and
+  keeping it would have contradicted `sftp_push`'s stack-completeness
+  assertion. `save()` writes all six files every time, even one with zero
+  rows.
 - `CsvStack.save` is **all-or-nothing** across the whole stack — every file
   is written to a staging directory first, and only promoted into place
   (one atomic rename) once every file has written successfully. A failure
@@ -333,21 +433,24 @@ use a fixed, documented exit-code contract:
 
 ```
 src/drift_engine/
-  schema.py      # CSV column contract, file specs, natural keys
+  schema.py      # CSV column contract, file specs, natural keys; the one place
+                 # the row-per-contact pattern lives (expand_contact_rows)
   models.py      # shared dataclasses: Change, RunPlan, RunResult, EventType,
                  # EventSubject (see the corrected event-type note in this file)
   safety.py      # sandbox-only hard gates: host/username allowlist, fingerprint
                  # (presence + strength), scale sanity, production-marker tripwire
   config.py      # loads config/districts.yml + .env (PyYAML, with a stdlib fallback parser)
   csvstack.py    # in-memory CSV load/apply/save; raises on a missing required
-                 # column; save is all-or-nothing across the whole stack
+                 # column; save is all-or-nothing across the whole stack;
+                 # counts() reports distinct students + derived contacts
   cadence.py     # deterministic day-of-week bucket logic
   selection.py   # randomized (seeded) target selection within the fixed cadence;
                  # re-rolls/skips any UPDATE whose value wouldn't actually change
   content.py     # the ONLY module that touches an LLM — isolated per brief §5
-  seed.py        # one-time/staged contacts.csv baseline seeding
+  seed.py        # one-time/staged guardian-contact-row baseline seeding
   guardrail.py   # Clever's 10% pause threshold + this engine's 2% ceiling;
-                 # nets out matched enrollment-move pairs; catches unexplained row loss
+                 # nets out matched enrollment-move pairs; attributes contact-row
+                 # deletes to `contacts`, not `students`; catches unexplained row loss
   sftp_push.py   # SFTP upload (paramiko, imported lazily); asserts stack completeness
                  # before uploading; writes last_pushed_counts.json after a real push
   audit.py       # JSON / Markdown / history.jsonl report generation;
@@ -362,7 +465,8 @@ state/<district>/       # baseline/ (pristine export, never written to) + curren
                          # (working stack) + .lock (per-run exclusivity) +
                          # baseline_counts.json + last_push.json + last_pushed_counts.json
 logs/<district>/        # per-run JSON + Markdown reports, plus history.jsonl
-docs/SCHEMA.md           # the CSV contract and the three engine-added deviations
+docs/SCHEMA.md           # the CSV contract, the engine-added columns, and the
+                         # row-per-contact shape on students.csv
 docs/RUNBOOK.md          # operational guide
 docs/index.html          # GitHub Pages project page
 ```
@@ -388,7 +492,7 @@ never as `python3 -m scripts.minipytest` (see the module docstring for why):
 python3 scripts/minipytest.py
 ```
 
-Current result: **222 passed, 2 skipped** (the 2 skips are `paramiko`
+Current result: **249 passed, 2 skipped** (the 2 skips are `paramiko`
 host-key-policy tests — `paramiko` isn't installable in the no-PyPI build
 sandbox; they run under real pytest with `paramiko` installed). Real
 paramiko behaviour (retry, timeout, host-key policy, size verification) is
@@ -409,27 +513,40 @@ but all four should be understood before a first live push:
    not a bug. Note this no longer needs a *new* `EventType` — `USERS_DELETED`
    with `EventSubject.TEACHER` already exists — it just needs selection
    logic that picks a teacher to remove.
-2. **KNOWN BLOCKER: contacts are not their own CSV on Clever's real SFTP
-   feed.** See "KNOWN BLOCKER" under [Event types produced](#event-types-produced)
-   above — this engine's `contacts.csv` is very likely the wrong shape for a
-   real sandbox ingest. Deferred pending David verifying the CSV spec his
-   sandbox actually accepts; do not implement the rework speculatively.
-3. **`eventing_verified` is still `false`.** Secure Sync / district-app
+2. **`eventing_verified` is still `false`.** Secure Sync / district-app
    token eventing has not been confirmed active for this district (brief
    §9). Must be verified in the Clever dashboard before any partner-facing
    use.
-4. **paramiko is untested in this build.** See the test-suite note above —
+3. **paramiko is untested in this build.** See the test-suite note above --
    real SFTP transport behaviour is reviewed, not executed.
+4. **Contacts are never scale-checked, because their baseline is zero.**
+   `safety.assert_scale_sane` skips any record type whose *baseline* count is
+   `0`, and `baseline_counts.json` is written once on a district's genuine
+   first run and never re-anchored afterwards. For this district that bakes in
+   `contacts: 0` permanently, so contact growth during seeding -- and, more
+   importantly, later contact *attrition* -- is never scale-checked at all.
+   This is not a hole in deletion protection: the guardrail's 10% per-run
+   deletion threshold still covers contact deletion, and now attributes
+   contact-row deletes to `contacts` correctly. But if a deliberate
+   re-baseline step is ever added post-seeding, that is the exact moment this
+   gate starts working -- it should be a considered decision, not a side
+   effect of someone tidying up state files.
 
-Resolved (previously listed here as an open risk): whether the
-`Middle name`/`Teacher 2 id` engine-added columns loading as empty produces a
-first-sync event burst. It does not — see "Resolved" under
-[Event types produced](#event-types-produced) above.
+Resolved (both previously listed here as open risks):
+
+- Whether the `Middle name`/`Teacher 2 id` engine-added columns loading as
+  empty produces a first-sync event burst. It does not -- see "Resolved" under
+  [Event types produced](#event-types-produced) above.
+- Whether contacts belong in their own `contacts.csv`. They do not, and the
+  engine has been reworked accordingly -- verified against SFTP Instructions
+  v2.1.1 on 2026-08-05. See "Confirmed, then fixed" under
+  [Event types produced](#event-types-produced) above.
 
 ## More documentation
 
-- [docs/SCHEMA.md](docs/SCHEMA.md) — the CSV contract, the three engine-added
-  columns/files, and why they were needed.
+- [docs/SCHEMA.md](docs/SCHEMA.md) -- the CSV contract, the engine-added
+  columns and why they were needed, and the row-per-contact shape of
+  `students.csv`.
 - [docs/RUNBOOK.md](docs/RUNBOOK.md) — operational guide: setup, go-live
   checklist, staged seeding, reading audit reports, troubleshooting.
 - [CHANGELOG.md](CHANGELOG.md) — release history.

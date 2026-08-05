@@ -4,6 +4,159 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.0] - 2026-08-05
+
+Resolves the project's one remaining hard blocker: contacts were the wrong CSV
+shape entirely. The blocker was confirmed real, not assumed away, and the
+engine reworked around the verified spec. Also fixes two latent data-corruption
+bugs found while rebuilding the test suite.
+
+### Fixed
+
+- **KNOWN BLOCKER RESOLVED: contacts are rows on `students.csv`, not a
+  separate `contacts.csv`.** Confirmed against Clever's official **SFTP
+  Instructions v2.1.1 (Dec 2025)** and the standard SFTP allowable-fields
+  list. The spec states the mechanism directly under students.csv: "In order
+  to provide multiple parent/guardian contacts, you may create multiple rows
+  for a single student with different contact information." So the 5-contacts-
+  per-student SFTP limit is **up to 5 rows sharing one `Student id`**, each
+  carrying one contact via seven unsuffixed columns (`Contact relationship`,
+  `Contact type`, `Contact name`, `Contact phone`, `Contact phone type`,
+  `Contact email`, `Contact sis id`) -- not a separate file, and not numbered
+  column slots. The engine's standalone `contacts.csv` would have been ignored
+  on ingest (or rejected as unknown columns), meaning **none** of its predicted
+  contact events would ever have fired. `schema.CONTACTS` is deleted;
+  `ALL_SPECS` is six files, not seven.
+- **`contact_name_2` .. `_5` do not exist.** An interim reading of the dev
+  docs suggested contacts widened into numbered column slots the way
+  co-teachers do. They do not. `sections.csv` genuinely does use numbered
+  suffixes (`Teacher 2 id` through `Teacher 10 id`); contacts repeat as rows.
+  Two different patterns in one spec, now called out explicitly in
+  `schema.py` and `docs/SCHEMA.md` so they are not conflated again. All row
+  expansion goes through a single function, `schema.expand_contact_rows`, so
+  a future spec correction is one function rather than a rework.
+- **`Contact sis id` is minted per contact and never edited.** Per Clever's
+  docs, a contact carrying an sis id keeps the same Clever id across
+  phone/email/name changes; without one, identity is derived from name+email
+  (else name+phone, else name+type+relationship+phone type), so editing an
+  email changes the identity key itself and reads as delete-then-create rather
+  than `users.updated`. Confirmed by a live case: when IDEA Public Schools
+  added `contact_sis_id`, PE confirmed every existing contact Clever id would
+  change, there being no id-preservation path once the identity basis shifts.
+  Seeded contacts use `SEED<student id>-<n>`, drift-added ones `CON######`;
+  the column is deliberately absent from `STUDENTS.mutable`.
+- **`students.csv`'s natural key is now `(Student id, Contact sis id)`.**
+  `Student id` alone is no longer unique, and leaving the old single-column
+  key would have been silent data loss rather than an error: `CsvStack.index`
+  would collapse a student's contact rows last-one-wins, and `get` would
+  return an arbitrary sibling.
+- **Seeding no longer bricks the district on the scale-sanity gate.**
+  `CsvStack.counts` now reports `students` as **distinct `Student id`** and
+  adds a derived `contacts` count, because contacts have no file of their own
+  to count rows in. Reported as raw rows, seeding takes students.csv from
+  33,621 to ~52,900 -- a **+57%** move straight through
+  `safety.MAX_SCALE_DRIFT` (25%). Since a stale baseline is a hard
+  `SafetyViolation` and not a silent re-anchor, every run would then have
+  blocked until someone re-baselined by hand, mid-seed.
+- **Guardian churn no longer inflates the student deletion ratio.** A contact
+  removal is a `students.csv` row delete, so attributing deletions by filename
+  alone would walk the *students* ratio toward Clever's 10% pause threshold on
+  routine churn -- and, worse, camouflage a genuine student deletion inside
+  that noise. `guardrail._attributed_record_type` counts a change against
+  `contacts` when its `event_subject` is CONTACT, and against `students` only
+  when it is genuinely about the student. Attribution keys on the predicted
+  Clever-level effect rather than the CSV operation, because for contacts the
+  two legitimately diverge: filling a student's blank row is a CSV UPDATE but
+  a contact CREATE to Clever.
+- **Student-level edits fan out across a student's rows.** An edit to
+  `Middle name` or `Student email` landing on only one of a student's rows
+  would leave that student presenting two different values for one field in a
+  single file. `CsvStack.apply` now copies student-level columns to every
+  sibling row; contact-level columns deliberately stay put. Selection also
+  draws from a new `distinct_students()` rather than raw rows, so a student
+  with three guardians is no longer three times as likely to be picked.
+- **A student's last row is never deleted while removing a contact.** That
+  would delete the student along with the guardian. `selection.py` already
+  refused to remove a student's final contact; `CsvStack.apply` now enforces
+  it independently as a backstop, since the cost of getting it wrong is
+  destroying a real student record.
+- **`CsvStack.apply` deleted rows by a stale index.** Row positions were
+  resolved in the validation pass and reused in the mutation pass, so the
+  second of two DELETEs on the same file used an index that had already
+  shifted -- an `IndexError` in a short file, or **silently deleting an
+  innocent bystander row** in a long one. Predates this rework, but the
+  row-per-contact shape makes it far easier to hit (removing two guardians
+  from one student, or two enrollments from one section). The position is now
+  re-resolved by object identity immediately before deletion.
+- **Guardrail move-netting was loose enough to defeat itself.** Netting
+  matched any CREATE against any DELETE of the same record type, so a Tue/Thu
+  run adding 4 guardians and removing 2 computed `min(2, 4) == 2` and netted
+  every contact deletion away to zero -- the guardrail could never report
+  contact attrition at all. Netting is now matched on record *identity*
+  (record type, `Student id`, and `Contact sis id` for contacts), so a genuine
+  enrollment move still nets to zero while unrelated guardian churn does not.
+
+### Changed
+
+- **`FileSpec.engine_added` removed.** `contacts.csv` was its only user. The
+  flag's two branches (skip a missing engine-added file on load, omit a
+  zero-row one on save) now contradicted
+  `sftp_push._assert_stack_complete`, which requires every file in
+  `ALL_SPECS` unconditionally -- a stack `save` produced would have been
+  rejected by `push`. Every file is now always written, header-only if empty.
+- `sftp_push._assert_stack_complete` no longer has any exception: a missing
+  file is always `IncompleteStackError`.
+- A stale pre-0.2.0 `contacts.csv` in `current/` cleans itself up on the next
+  `save`, which promotes a freshly staged directory containing only
+  `ALL_SPECS`. It was never pushed live, so there is no remote copy.
+- Test suite: 249 passing (was 222), 2 skipped (paramiko, unchanged).
+
+### Verified against the real stack
+
+Not just unit-tested -- run end to end against the 33,621-student Tulsa
+replica export:
+
+- `estimate-seed` unchanged at 33,621 students / 52,931 expected contacts /
+  4,000 per staged run across ~9 runs.
+- A staged `seed --limit 4000` dry run created 6,771 contacts across 4,000
+  students, taking students.csv to 36,392 rows while `counts()["students"]`
+  stayed 33,621. Scale sanity passed; the same run measured as raw rows would
+  have read as +57% drift after a full seed.
+- After a full seed (52,819 contacts): Monday predicted 6 `users.updated
+  (Contacts)` + 4 `users.updated (Students)`; Tuesday added 8
+  `sections.updated`, 3 `users.created (Contacts)` and 2 `users.deleted
+  (Contacts)`, with the guardrail attributing those deletions to **contacts at
+  0.0038%** -- far below the 2% warn and 10% block; Friday added 3
+  `sections.updated` and 1 `users.created (Teachers)`. This is the brief's
+  §11 success criteria met on real data.
+- Integrity after three simulated days of drift: zero sibling-row column
+  disagreements, zero students over the 5-contact cap, zero students orphaned
+  to no contacts, all 52,820 `Contact sis id` values unique.
+
+### Known limitations
+
+- `eventing_verified` is still `false` in `config/districts.yml`. Unchanged
+  and still required before partner-facing use.
+- The Friday bucket adds one teacher a week with no attrition, breaching
+  `MAX_SCALE_DRIFT` in roughly 7 years. Still deliberately deferred.
+- Real `paramiko` SFTP behaviour remains code-reviewed but never executed (not
+  installable here; 2 tests skip). Watch the first live push.
+- **New:** `safety.assert_scale_sane` skips any record type whose *baseline*
+  is 0, and `baseline_counts.json` is written once on a district's first run
+  and never re-anchored. For this district `contacts: 0` is baked in, so
+  contact growth and later contact attrition are never scale-checked. The 10%
+  per-run deletion guardrail still covers contact deletion, so this is not a
+  hole in deletion protection -- but if a post-seeding re-baseline step is
+  ever added, that is the moment this gate starts working, and it should be a
+  deliberate decision rather than a side effect.
+
+### Note on partner communication
+
+On the SIS-managed auto-sync side, `contact.sis_id` is only honored for
+Infinite Campus, IC OneRoster API, Skyward, and Skyward API. Irrelevant to
+this SFTP sandbox, but worth a footnote to any partner who will compare
+sandbox behaviour against a real auto-synced district's feed.
+
 ## [0.1.0] - 2026-07-30
 
 Initial release. Full build of the sandbox Events API data drift engine per
@@ -248,6 +401,12 @@ Documented honestly rather than hidden; none block sandbox use today:
   sandbox actually accepts. Deliberately **not implemented** here — do not
   attempt this rework speculatively; see `docs/SCHEMA.md`'s "KNOWN BLOCKER"
   section.
+  **RESOLVED in 0.2.0 (2026-08-05)** — the blocker was real, and the caution
+  was warranted: the shape was wrong in a way this entry did not fully
+  anticipate. Contacts are not numbered columns on the student row but
+  *repeated rows* per `Student id`, and the column names are spaced and
+  capitalized (`Contact name`, not `contact_name`). See the 0.2.0 entry above
+  for the verified spec and the rework.
 - `eventing_verified` is still `false` in `config/districts.yml` — Secure
   Sync / district-app token eventing has not been confirmed active for this
   district (brief §9). Must be verified before partner-facing use.

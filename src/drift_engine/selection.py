@@ -71,11 +71,19 @@ class _IdMinter:
     seeded teacher ids in the sample data look like ``TCH5000``, so a
     ``TCH9...`` id is unambiguous at a glance without colliding with the
     real numbering space).
+
+    A minted ``Contact sis id`` is PERMANENT. Per Clever's docs, a contact
+    carrying an sis id keeps its Clever id across phone/email/name changes,
+    and the one thing that *does* change its Clever id is the sis id itself
+    changing. So this value is written once at contact creation and never
+    touched again -- which is exactly what makes a guardian email edit surface
+    as ``users.updated`` instead of a delete-then-create pair.
     """
 
     def __init__(self) -> None:
         self._counters: dict[str, int] = {}
         self._minted: dict[str, set[str]] = {}
+        self._existing_contact_sis_ids: set[str] | None = None
 
     def mint(self, stack: CsvStack, *, filename: str, prefix: str, width: int) -> str:
         counter = self._counters.get(prefix, 1)
@@ -93,8 +101,31 @@ class _IdMinter:
             self._counters[prefix] = counter
             return candidate
 
-    def mint_contact_id(self, stack: CsvStack) -> str:
-        return self.mint(stack, filename=schema.CONTACTS.filename, prefix="CON", width=6)
+    def mint_contact_sis_id(self, stack: CsvStack) -> str:
+        """Mint an unused ``Contact sis id``.
+
+        Cannot go through :meth:`mint`, which resolves candidates via
+        ``stack.get(filename, (candidate,))``: students.csv is keyed on
+        (Student id, Contact sis id) now, so a one-element key tuple would
+        never match and every candidate would look free. Collision-checks
+        against the set of sis ids actually present instead.
+        """
+
+        if self._existing_contact_sis_ids is None:
+            self._existing_contact_sis_ids = {
+                row.get(schema.CONTACT_SIS_ID_COLUMN, "") for row in stack.contacts()
+            }
+        existing = self._existing_contact_sis_ids
+        minted_here = self._minted.setdefault("CON", set())
+        counter = self._counters.get("CON", 1)
+        while True:
+            candidate = f"CON{counter:06d}"
+            counter += 1
+            if candidate in minted_here or candidate in existing:
+                continue
+            minted_here.add(candidate)
+            self._counters["CON"] = counter
+            return candidate
 
     def mint_teacher_id(self, stack: CsvStack) -> str:
         return self.mint(stack, filename=schema.TEACHERS.filename, prefix="TCH9", width=5)
@@ -158,8 +189,12 @@ def _generate_changed_value(before_value: str, generate) -> str | None:
 # Small daily bucket
 # ---------------------------------------------------------------------------
 
-_CONTACT_EDIT_FIELDS: tuple[str, ...] = ("Email", "Phone", "Phone type")
+_CONTACT_EDIT_FIELDS: tuple[str, ...] = ("Contact email", "Contact phone", "Contact phone type")
 _CONTACT_EDIT_WEIGHTS: tuple[int, ...] = (6, 2, 2)  # Email most often.
+
+#: ``Contact sis id`` is deliberately absent from ``_CONTACT_EDIT_FIELDS`` and
+#: from ``schema.STUDENTS.mutable``. Editing it would change the contact's
+#: Clever id, turning every subsequent edit into a delete-then-create pair.
 
 _STUDENT_EDIT_FIELDS: tuple[str, ...] = ("Middle name", "Student email")
 _STUDENT_EDIT_WEIGHTS: tuple[int, ...] = (7, 3)  # Middle name is the primary driver.
@@ -175,25 +210,32 @@ def _small_daily(
     changes: list[Change] = []
 
     # -- Contact field edits -------------------------------------------------
-    # contacts.csv is engine-owned and seeded separately; a district that has
-    # never had a contacts run yet has zero contacts. That is not an error.
+    # Contacts are rows on students.csv (schema module docstring), so a
+    # contact row already carries its student's columns -- no join needed to
+    # read the student's last name. A district whose students have no
+    # guardians yet has zero contacts; that is not an error, it just means
+    # this sub-bucket contributes nothing until seeding has run.
     contacts = stack.contacts()
     if contacts:
         # Shared with big_student's contact removal below, so the same
         # contact is never both field-edited and removed in one run -- that
         # would read as a confusing non-sequitur in David's audit log.
-        contact_touched = _touched(touched, "contacts.csv:touched")
-        pool = [c for c in _shuffled(rng, contacts) if c["Contact id"] not in contact_touched]
+        contact_touched = _touched(touched, "contacts:touched")
+        pool = [
+            c
+            for c in _shuffled(rng, contacts)
+            if c[schema.CONTACT_SIS_ID_COLUMN] not in contact_touched
+        ]
         for contact in pool[:SMALL_DAILY_CONTACT_FIELD_EDITS]:
-            contact_touched.add(contact["Contact id"])
+            contact_sis_id = contact[schema.CONTACT_SIS_ID_COLUMN]
+            contact_touched.add(contact_sis_id)
             field = rng.choices(_CONTACT_EDIT_FIELDS, weights=_CONTACT_EDIT_WEIGHTS, k=1)[0]
             student_id = contact.get("Student id", "")
-            student = stack.get(schema.STUDENTS.filename, (student_id,))
-            student_last_name = student["Last name"] if student else ""
+            student_last_name = contact.get("Last name", "")
             before_value = contact.get(field, "")
 
             ai_generated = False
-            if field == "Email":
+            if field == "Contact email":
                 # Fix 1: ``guardian_email`` is a PURE function of (name,
                 # student last name) -- calling it again with the exact same
                 # inputs used to recompute the exact same address every
@@ -210,10 +252,10 @@ def _small_daily(
                     ),
                 )
                 ai_generated = True
-            elif field == "Phone":
+            elif field == "Contact phone":
                 new_value = _generate_changed_value(before_value, lambda attempt: content.phone())
                 ai_generated = True
-            else:  # Phone type -- a fixed domain pick, not AI content.
+            else:  # Contact phone type -- a fixed domain pick, not AI content.
                 choices = [v for v in schema.PHONE_TYPES if v != before_value]
                 new_value = rng.choice(choices) if choices else None
 
@@ -225,9 +267,12 @@ def _small_daily(
 
             changes.append(
                 Change(
-                    filename=schema.CONTACTS.filename,
+                    filename=schema.STUDENTS.filename,
                     operation=Operation.UPDATE,
-                    key={"Contact id": contact["Contact id"]},
+                    key={
+                        "Student id": student_id,
+                        schema.CONTACT_SIS_ID_COLUMN: contact_sis_id,
+                    },
                     bucket=Bucket.SMALL_DAILY,
                     expected_event=EventType.USERS_UPDATED,
                     event_subject=EventSubject.CONTACT,
@@ -235,8 +280,10 @@ def _small_daily(
                     after={field: new_value},
                     note=(
                         f"Small daily: changed {field!r} for contact "
-                        f"{contact.get('Contact name', contact['Contact id'])} "
-                        f"(student {student_id}) from {before_value!r} to {new_value!r}."
+                        f"{contact.get('Contact name', contact_sis_id)} "
+                        f"(student {student_id}) from {before_value!r} to {new_value!r}. "
+                        f"Contact sis id {contact_sis_id} is unchanged, so this is "
+                        "expected to surface as users.updated, not delete-then-create."
                     ),
                     ai_generated=ai_generated,
                 )
@@ -244,9 +291,17 @@ def _small_daily(
 
     # -- Student field edits ---------------------------------------------------
     # Brief §4: small daily changes "primarily affect student records."
+    # ``distinct_students``, not ``students``: a student with N contacts
+    # occupies N rows, so sampling raw rows would weight each student by their
+    # guardian count and hand students with more contacts proportionally more
+    # of the daily edits. The edit itself still lands on a single row and
+    # ``CsvStack.apply`` fans student-level columns out to the siblings, so
+    # the student never presents two different emails in one file.
     student_touched = _touched(touched, "students.csv:field_edit")
     students = [
-        s for s in _shuffled(rng, stack.students()) if s["Student id"] not in student_touched
+        s
+        for s in _shuffled(rng, stack.distinct_students())
+        if s["Student id"] not in student_touched
     ]
     for student in students[:SMALL_DAILY_STUDENT_FIELD_EDITS]:
         student_touched.add(student["Student id"])
@@ -277,7 +332,12 @@ def _small_daily(
             Change(
                 filename=schema.STUDENTS.filename,
                 operation=Operation.UPDATE,
-                key={"Student id": student["Student id"]},
+                key={
+                    "Student id": student["Student id"],
+                    schema.CONTACT_SIS_ID_COLUMN: student.get(
+                        schema.CONTACT_SIS_ID_COLUMN, ""
+                    ),
+                },
                 bucket=Bucket.SMALL_DAILY,
                 expected_event=EventType.USERS_UPDATED,
                 event_subject=EventSubject.STUDENT,
@@ -285,7 +345,9 @@ def _small_daily(
                 after={field: new_value},
                 note=(
                     f"Small daily: set {field!r} for student {first} {last} "
-                    f"({student['Student id']}) to {new_value!r}."
+                    f"({student['Student id']}) to {new_value!r}. Applied to every "
+                    "row for this student, since a student's contact rows must "
+                    "carry identical student-level columns."
                 ),
                 ai_generated=True,
             )
@@ -354,9 +416,15 @@ def _big_student(
         student_id = enrollment.get("Student id", "")
         if student_id in moved_students:
             continue
-        student = stack.get(schema.STUDENTS.filename, (student_id,))
-        if student is None:
+        # student_rows_for, not stack.get: students.csv is keyed on
+        # (Student id, Contact sis id) and an enrollment row only has the
+        # Student id half. Any of the student's rows serves here -- only
+        # student-level columns are read below, and those are identical
+        # across siblings.
+        student_rows = stack.student_rows_for(student_id)
+        if not student_rows:
             continue
+        student = student_rows[0]
         old_section_id = enrollment.get("Section id", "")
         new_section = _find_move_target(stack, student, old_section_id, rng)
         if new_section is None:
@@ -398,46 +466,93 @@ def _big_student(
         )
 
     # -- Contacts added ------------------------------------------------------
+    # Two shapes, because a contact is a ROW on students.csv:
+    #
+    #   * Student already has >=1 contact -> CREATE a new row carrying the
+    #     same student-level columns plus this guardian's contact columns.
+    #   * Student has 0 contacts -> they still occupy exactly one row, with
+    #     the contact columns blank. Filling that row in place is an UPDATE,
+    #     not a CREATE, because creating a row would leave the blank one
+    #     behind and duplicate the student.
+    #
+    # Either way the predicted event is users.created (Contacts): a guardian
+    # object that did not exist now does. This is the one place in the engine
+    # where the CSV operation and the Clever-level event deliberately
+    # disagree, so the guardrail keys on the event, not the operation.
     contact_added_for = _touched(touched, "students.csv:contact_added")
     students_for_contacts = [
-        s for s in _shuffled(rng, stack.students()) if s["Student id"] not in contact_added_for
+        s
+        for s in _shuffled(rng, stack.distinct_students())
+        if s["Student id"] not in contact_added_for
+        # Spec ceiling: at most 5 contacts per student over SFTP. A student
+        # already at the cap is skipped rather than truncated, so the run
+        # simply adds one fewer guardian that day.
+        and len(stack.contacts_for_student(s["Student id"])) < schema.MAX_CONTACTS_PER_STUDENT
     ]
     for student in students_for_contacts[:BIG_STUDENT_CONTACTS_ADDED]:
-        contact_added_for.add(student["Student id"])
+        student_id = student["Student id"]
+        contact_added_for.add(student_id)
         last_name = student.get("Last name", "")
         guardian_name = content.guardian_name(last_name)
         guardian_email = content.guardian_email(guardian_name, last_name)
         phone = content.phone()
-        contact_id = id_minter.mint_contact_id(stack)
-        existing_count = len(stack.contacts_for_student(student["Student id"]))
+        contact_sis_id = id_minter.mint_contact_sis_id(stack)
+        existing = stack.contacts_for_student(student_id)
 
-        changes.append(
-            Change(
-                filename=schema.CONTACTS.filename,
-                operation=Operation.CREATE,
-                key={"Contact id": contact_id},
-                bucket=Bucket.BIG_STUDENT,
-                expected_event=EventType.USERS_CREATED,
-                event_subject=EventSubject.CONTACT,
-                after={
-                    "School id": student.get("School id", ""),
-                    "Student id": student["Student id"],
-                    "Contact name": guardian_name,
-                    "Contact type": rng.choice(schema.CONTACT_TYPES),
-                    "Relationship": rng.choice(schema.RELATIONSHIPS),
-                    "Phone": phone,
-                    "Phone type": rng.choice(schema.PHONE_TYPES),
-                    "Email": guardian_email,
-                    "Sequence": str(existing_count + 1),
-                },
-                note=(
-                    f"Big student: added guardian contact {guardian_name} ({contact_id}) "
-                    f"for student {student.get('First name', '')} {last_name} "
-                    f"({student['Student id']})."
-                ),
-                ai_generated=True,
-            )
+        contact_values = {
+            "Contact name": guardian_name,
+            "Contact type": rng.choice(schema.CONTACT_TYPES),
+            "Contact relationship": rng.choice(schema.RELATIONSHIPS),
+            "Contact phone": phone,
+            "Contact phone type": rng.choice(schema.PHONE_TYPES),
+            "Contact email": guardian_email,
+        }
+        note = (
+            f"Big student: added guardian contact {guardian_name} "
+            f"(Contact sis id {contact_sis_id}) for student "
+            f"{student.get('First name', '')} {last_name} ({student_id}), "
+            f"giving them {len(existing) + 1} of at most "
+            f"{schema.MAX_CONTACTS_PER_STUDENT} contact(s)."
         )
+
+        if existing:
+            changes.append(
+                Change(
+                    filename=schema.STUDENTS.filename,
+                    operation=Operation.CREATE,
+                    key={
+                        "Student id": student_id,
+                        schema.CONTACT_SIS_ID_COLUMN: contact_sis_id,
+                    },
+                    bucket=Bucket.BIG_STUDENT,
+                    expected_event=EventType.USERS_CREATED,
+                    event_subject=EventSubject.CONTACT,
+                    # The new row must repeat the student's columns verbatim,
+                    # or this student would present blank student-level values
+                    # on one of their rows.
+                    after={**schema.student_fields(student), **contact_values},
+                    note=note + " New students.csv row for the same Student id.",
+                    ai_generated=True,
+                )
+            )
+        else:
+            changes.append(
+                Change(
+                    filename=schema.STUDENTS.filename,
+                    operation=Operation.UPDATE,
+                    key={"Student id": student_id, schema.CONTACT_SIS_ID_COLUMN: ""},
+                    bucket=Bucket.BIG_STUDENT,
+                    expected_event=EventType.USERS_CREATED,
+                    event_subject=EventSubject.CONTACT,
+                    before=schema.blank_contact_fields(),
+                    after={**contact_values, schema.CONTACT_SIS_ID_COLUMN: contact_sis_id},
+                    note=(
+                        note + " Filled the student's existing contact-less row in "
+                        "place; a CSV UPDATE, but a new guardian object to Clever."
+                    ),
+                    ai_generated=True,
+                )
+            )
 
     # -- Contacts removed ------------------------------------------------------
     # Hard rule: never remove a student's last remaining contact. The
@@ -452,14 +567,19 @@ def _big_student(
     # which have not been applied yet) is deliberately conservative -- it
     # may skip a removal that would technically be safe once this run's
     # additions land, but it can never orphan a student.
-    removed_contacts = _touched(touched, "contacts.csv:touched")
+    # Because a contact IS a row, removing one is a row DELETE -- and the
+    # "never remove a student's last contact" rule below is what keeps that
+    # safe. A student's last contact row is also their last row, so deleting
+    # it would delete the student too. CsvStack.apply refuses that outright as
+    # a backstop; this loop is what makes sure it never comes up.
+    removed_contacts = _touched(touched, "contacts:touched")
     removed_per_student: dict[str, int] = {}
     removals_made = 0
     for contact in _shuffled(rng, stack.contacts()):
         if removals_made >= BIG_STUDENT_CONTACTS_REMOVED:
             break
-        contact_id = contact["Contact id"]
-        if contact_id in removed_contacts:
+        contact_sis_id = contact[schema.CONTACT_SIS_ID_COLUMN]
+        if contact_sis_id in removed_contacts:
             continue
         student_id = contact.get("Student id", "")
         original_count = len(stack.contacts_for_student(student_id))
@@ -467,23 +587,27 @@ def _big_student(
         if original_count - already_removed <= 1:
             continue  # Would orphan this student once applied; skip.
 
-        removed_contacts.add(contact_id)
+        removed_contacts.add(contact_sis_id)
         removed_per_student[student_id] = already_removed + 1
         removals_made += 1
         remaining = original_count - removed_per_student[student_id]
         changes.append(
             Change(
-                filename=schema.CONTACTS.filename,
+                filename=schema.STUDENTS.filename,
                 operation=Operation.DELETE,
-                key={"Contact id": contact_id},
+                key={
+                    "Student id": student_id,
+                    schema.CONTACT_SIS_ID_COLUMN: contact_sis_id,
+                },
                 bucket=Bucket.BIG_STUDENT,
                 expected_event=EventType.USERS_DELETED,
                 event_subject=EventSubject.CONTACT,
-                before=dict(contact),
+                before=schema.contact_fields(contact),
                 note=(
                     f"Big student: removed guardian contact {contact.get('Contact name', '')} "
-                    f"({contact_id}) for student {student_id}, "
-                    f"leaving {remaining} contact(s) on record."
+                    f"(Contact sis id {contact_sis_id}) for student {student_id}, "
+                    f"leaving {remaining} contact(s) on record. Drops that "
+                    "students.csv row; the student keeps their other row(s)."
                 ),
             )
         )

@@ -33,10 +33,10 @@ import secrets
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from . import schema
-from .models import Change, Operation
+from .models import Change, EventSubject, Operation
 from .schema import ENGINE_ADDED_COLUMNS, FileSpec
 
 BASELINE_COUNTS_FILENAME = "baseline_counts.json"
@@ -89,6 +89,8 @@ class CsvStack:
         self._sections_by_school: dict[str, list[dict]] | None = None
         self._contacts_by_student: dict[str, list[dict]] | None = None
         self._sections_by_teacher: dict[str, list[dict]] | None = None
+        self._distinct_students: list[dict] | None = None
+        self._student_rows_by_id: dict[str, list[dict]] | None = None
 
     # ------------------------------------------------------------------
     # Load / save
@@ -98,11 +100,15 @@ class CsvStack:
     def load(cls, directory: Path) -> "CsvStack":
         """Read every file in ``schema.ALL_SPECS`` from ``directory``.
 
-        contacts.csv is engine-owned (``FileSpec.engine_added``) and will not
-        exist for a district that has never had a contacts drift run yet;
-        that is not an error, it just means we start with zero contacts.
+        Note there is no contacts.csv: contacts are rows on students.csv, and
+        their seven columns are engine-added, so on a stack this engine has
+        never touched they are simply absent from the header and get
+        backfilled with "" (tracked in ``migrated_columns``). A stale
+        contacts.csv left behind by the pre-2026-08-05 version of this engine
+        is ignored on load and disappears on the next ``save``, since save
+        promotes a freshly staged directory containing only ``ALL_SPECS``.
 
-        Every other file is a real SIS export and must be read exactly as
+        Every file is a real SIS export and must be read exactly as
         Clever produced it: CRLF line endings, utf-8, no quoting. Passing
         ``newline=""`` to ``open`` is required so Python's csv module -- not
         universal-newline translation -- is the thing that decides what a
@@ -115,10 +121,11 @@ class CsvStack:
 
         for spec in schema.ALL_SPECS:
             path = directory / spec.filename
-            if spec.engine_added and not path.exists():
-                tables[spec.filename] = []
-                continue
-
+            # Every file in ALL_SPECS is a real SIS export and must exist. The
+            # "engine-owned file may be absent" escape hatch that used to sit
+            # here was only ever for contacts.csv, which no longer exists, and
+            # keeping it would contradict sftp_push._assert_stack_complete --
+            # which now requires every one of these files unconditionally.
             with open(path, "r", encoding=schema.ENCODING, newline="") as fh:
                 reader = csv.DictReader(fh)
                 fieldnames = reader.fieldnames or []
@@ -198,9 +205,11 @@ class CsvStack:
         over the previous per-file scheme, where that window spanned the
         entire multi-file write.
 
-        contacts.csv is only written if it has rows, so a district that has
-        never had a contact created doesn't get an empty engine-owned file
-        cluttering the SFTP directory.
+        A useful side effect of promoting a freshly staged directory: any file
+        NOT in ``schema.ALL_SPECS`` is dropped. That is how a stale
+        contacts.csv from the pre-2026-08-05 version of this engine cleans
+        itself up locally. It was never pushed live (the shape was blocked
+        before first push), so there is no remote copy to worry about.
         """
 
         directory = Path(directory)
@@ -222,9 +231,13 @@ class CsvStack:
         try:
             for spec in schema.ALL_SPECS:
                 rows = self._tables.get(spec.filename, [])
-                if spec.engine_added and not rows:
-                    continue
-
+                # Always write the file, even with zero rows -- a header-only
+                # CSV is correct and pushable, whereas omitting the file
+                # entirely reads to Clever as every one of its rows being
+                # deleted, and would be rejected outright by
+                # sftp_push._assert_stack_complete. The old skip-if-empty
+                # branch here applied only to contacts.csv, which no longer
+                # exists.
                 staged_path = staging / spec.filename
                 with open(staged_path, "w", encoding=schema.ENCODING, newline="") as fh:
                     writer = csv.DictWriter(
@@ -288,12 +301,35 @@ class CsvStack:
         return self.index(filename).get(_key_str(key_tuple))
 
     def counts(self) -> dict[str, int]:
-        """record_type -> row count, for the guardrail and safety checks."""
+        """record_type -> record count, for the guardrail and safety checks.
 
-        return {
+        NOT a raw row count for students, and this distinction is load-bearing.
+        Contacts are rows on students.csv (see ``schema``), so a district
+        where every student has 1-2 guardians has far more student *rows* than
+        students. ``estimate-seed`` puts the real stack at 33,621 students and
+        52,931 expected contacts, i.e. seeding takes students.csv from 33,621
+        rows to 52,931 -- a +57% move. Reported as a raw row count that would
+        blow straight through ``safety.MAX_SCALE_DRIFT`` (25%), and because a
+        stale baseline is a hard SafetyViolation rather than a silent
+        re-anchor, the district would be bricked mid-seed until someone
+        re-baselined by hand.
+
+        So ``students`` counts **distinct Student id** (flat across seeding,
+        which is the honest answer to "is this still the same district?"), and
+        ``contacts`` is a derived count of rows carrying a contact. Contacts
+        have no file of their own to count rows in.
+        """
+
+        counts = {
             spec.record_type: len(self._tables.get(spec.filename, []))
             for spec in schema.ALL_SPECS
         }
+        student_rows = self._tables.get(schema.STUDENTS.filename, [])
+        counts["students"] = len({row.get("Student id", "") for row in student_rows})
+        counts[schema.CONTACTS_RECORD_TYPE] = sum(
+            1 for row in student_rows if schema.row_carries_contact(row)
+        )
+        return counts
 
     def _invalidate(self) -> None:
         self._indexes.clear()
@@ -302,13 +338,55 @@ class CsvStack:
         self._sections_by_school = None
         self._contacts_by_student = None
         self._sections_by_teacher = None
+        self._distinct_students = None
+        self._student_rows_by_id = None
 
     # ------------------------------------------------------------------
     # Bulk row access
     # ------------------------------------------------------------------
 
     def students(self) -> list[dict]:
+        """Every students.csv ROW, contacts included.
+
+        A student with N contacts appears N times. Selection almost always
+        wants :meth:`distinct_students` instead -- picking at random from this
+        list weights each student by their contact count, so a student with 3
+        guardians is 3x more likely to be chosen than one with 1.
+        """
+
         return self._tables.get(schema.STUDENTS.filename, [])
+
+    def distinct_students(self) -> list[dict]:
+        """One row per student, for unbiased selection and student-level reads.
+
+        Returns the first row for each Student id in file order. Student-level
+        columns are identical across a student's rows (``apply`` enforces
+        this), so which sibling is returned does not matter for those columns.
+        The contact half of the returned row is whichever contact happens to
+        sit on that first row; use :meth:`contacts_for_student` to see all of
+        them.
+        """
+
+        if self._distinct_students is None:
+            seen: set[str] = set()
+            result: list[dict] = []
+            for row in self.students():
+                sid = row.get("Student id", "")
+                if sid not in seen:
+                    seen.add(sid)
+                    result.append(row)
+            self._distinct_students = result
+        return self._distinct_students
+
+    def student_rows_for(self, student_id: str) -> list[dict]:
+        """Every students.csv row sharing ``student_id``, in file order."""
+
+        if self._student_rows_by_id is None:
+            index: dict[str, list[dict]] = {}
+            for row in self.students():
+                index.setdefault(row.get("Student id", ""), []).append(row)
+            self._student_rows_by_id = index
+        return self._student_rows_by_id.get(student_id, [])
 
     def teachers(self) -> list[dict]:
         return self._tables.get(schema.TEACHERS.filename, [])
@@ -323,7 +401,13 @@ class CsvStack:
         return self._tables.get(schema.SECTIONS.filename, [])
 
     def contacts(self) -> list[dict]:
-        return self._tables.get(schema.CONTACTS.filename, [])
+        """Every populated contact in the district, as students.csv rows.
+
+        A projection over students.csv, not a table of its own -- contacts
+        stopped being a separate file on 2026-08-05 (see ``schema``).
+        """
+
+        return [row for row in self.students() if schema.row_carries_contact(row)]
 
     def enrollments(self) -> list[dict]:
         return self._tables.get(schema.ENROLLMENTS.filename, [])
@@ -365,6 +449,13 @@ class CsvStack:
         return self._sections_by_school.get(school_id, [])
 
     def contacts_for_student(self, student_id: str) -> list[dict]:
+        """This student's populated contact rows (0 to MAX_CONTACTS_PER_STUDENT).
+
+        A student with no guardians has one students.csv row with the contact
+        columns blank; that row is correctly excluded here, so this returns []
+        rather than one empty pseudo-contact.
+        """
+
         if self._contacts_by_student is None:
             index: dict[str, list[dict]] = {}
             for row in self.contacts():
@@ -386,14 +477,19 @@ class CsvStack:
         return self._sections_by_teacher.get(teacher_id, [])
 
     def students_in_section(self, section_id: str) -> list[dict]:
-        """Students enrolled in ``section_id``, via the enrollments join."""
+        """Students enrolled in ``section_id``, via the enrollments join.
 
-        student_index = self.index(schema.STUDENTS.filename)
+        One row per student, not one per contact row -- resolved through
+        ``student_rows_for`` rather than ``index()``, because the students.csv
+        natural key is now (Student id, Contact sis id) and an enrollment row
+        only carries the Student id half.
+        """
+
         result = []
         for enrollment in self.enrollments_for_section(section_id):
-            student = student_index.get(_key_str((enrollment.get("Student id", ""),)))
-            if student is not None:
-                result.append(student)
+            rows = self.student_rows_for(enrollment.get("Student id", ""))
+            if rows:
+                result.append(rows[0])
         return result
 
     # ------------------------------------------------------------------
@@ -463,13 +559,84 @@ class CsvStack:
             elif change.operation is Operation.UPDATE:
                 assert row is not None
                 row.update(change.after)
+                if change.filename == schema.STUDENTS.filename:
+                    self._fan_out_student_columns(rows, row, change.after)
             elif change.operation is Operation.DELETE:
                 assert row is not None
-                del rows[position]
+                if change.filename == schema.STUDENTS.filename:
+                    self._assert_not_last_student_row(rows, row, change)
+                # Re-resolve the position by identity HERE rather than reusing
+                # the one captured in pass 1. Pass-1 positions go stale the
+                # moment an earlier DELETE in the same batch shifts the list:
+                # deleting rows 1 and 3 of [A,B,C,D] by stale index removes B
+                # (correct) and then index 3 of a now-3-element list
+                # (IndexError) -- or, in a longer file, an innocent bystander
+                # row nobody asked to delete. Two deletes on one file in one
+                # batch is ordinary (two guardians removed from one student,
+                # two enrollments dropped from one section).
+                current = next((i for i, r in enumerate(rows) if r is row), None)
+                if current is None:  # pragma: no cover - defensive
+                    raise KeyError(
+                        f"DELETE change for {change.filename} key {change.key!r} "
+                        "resolved during validation but its row is no longer in the "
+                        "table; refusing to delete by a stale position."
+                    )
+                del rows[current]
             else:  # pragma: no cover - Operation is an exhaustive enum
                 raise ValueError(f"Unknown operation {change.operation!r}")
 
         self._invalidate()
+
+    @staticmethod
+    def _fan_out_student_columns(
+        rows: list[dict], target: dict, after: Mapping[str, str]
+    ) -> None:
+        """Copy student-level edits from ``target`` to its sibling rows.
+
+        A student with N contacts occupies N rows carrying identical
+        student-level columns. An edit to ``Middle name`` or ``Student email``
+        that landed on only one of them would leave that student presenting
+        two different values for the same field in one file -- which Clever
+        would read as an ambiguous record, and which no SIS export would ever
+        produce. Contact-level columns are deliberately NOT fanned out: those
+        are what distinguishes one row from its siblings.
+        """
+
+        student_columns = {
+            col: val for col, val in after.items() if col in schema.STUDENT_LEVEL_COLUMNS
+        }
+        if not student_columns:
+            return
+        student_id = target.get("Student id", "")
+        for sibling in rows:
+            if sibling is not target and sibling.get("Student id", "") == student_id:
+                sibling.update(student_columns)
+
+    @staticmethod
+    def _assert_not_last_student_row(rows: list[dict], row: dict, change: Change) -> None:
+        """Refuse to delete a student's only row while removing a contact.
+
+        Removing a guardian is a row delete -- unless it's the student's last
+        remaining row, in which case deleting it deletes the STUDENT too. That
+        is never what a contact removal means, and it would show up on the
+        partner's feed as ``users.deleted (Students)`` plus a vanished roster
+        entry. Selection must blank the contact columns in place instead (an
+        UPDATE), keeping the student's single row alive. Enforced here rather
+        than trusted to selection, because the cost of getting it wrong is
+        deleting a real student record.
+        """
+
+        student_id = row.get("Student id", "")
+        siblings = sum(1 for r in rows if r.get("Student id", "") == student_id)
+        if siblings > 1:
+            return
+        if change.event_subject is EventSubject.CONTACT:
+            raise ValueError(
+                f"DELETE change for students.csv key {change.key!r} would remove "
+                f"student {student_id!r}'s ONLY row while trying to remove a "
+                "contact, deleting the student along with the guardian. Blank "
+                "the contact columns in place instead (Operation.UPDATE)."
+            )
 
     # ------------------------------------------------------------------
     # Safety-module support

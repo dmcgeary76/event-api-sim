@@ -1,12 +1,26 @@
-"""One-time contacts.csv seeding.
+"""One-time guardian-contact seeding onto students.csv.
 
-David's sandbox has no ``contacts.csv`` at all -- it is an engine-added file
-(``schema.CONTACTS.engine_added``) that simply doesn't exist until this
-module (or a drift run) creates it. The contact lifecycle this module seeds
--- a guardian created, later edited, later removed -- depends on students
-having *some* baseline set of contacts to edit or remove; the small-daily and
-big-student buckets in ``selection.py`` already assume that, and simply
-produce zero contact-related changes for a student with none.
+David's sandbox export carries no guardian data: every student has one
+students.csv row with the seven engine-added contact columns blank. The
+contact lifecycle this module seeds -- a guardian created, later edited,
+later removed -- depends on students having *some* baseline set of contacts
+to edit or remove; the small-daily and big-student buckets in
+``selection.py`` already assume that, and simply produce zero contact-related
+changes for a student with none.
+
+Contacts are ROWS, not a file (corrected 2026-08-05; see the ``schema``
+module docstring and SFTP Instructions v2.1.1). That makes seeding two
+different operations rather than one:
+
+* A student's **first** guardian fills their existing contact-less row in
+  place -- an ``Operation.UPDATE``. Creating a row instead would leave the
+  blank one behind and duplicate the student.
+* Each **subsequent** guardian is a new row for the same Student id -- an
+  ``Operation.CREATE`` repeating that student's student-level columns
+  verbatim.
+
+Both predict ``users.created`` (Contacts): a guardian object that did not
+exist now does, whatever the CSV-level operation was.
 
 NOTE: the project brief (§3) called these ``contacts.created`` /
 ``contacts.updated`` / ``contacts.deleted`` as if they were their own event
@@ -49,8 +63,17 @@ once seeded, a district with ~50,000 contacts has a deletion ceiling of
 review. The steady-state drift cadence only removes
 ``cadence.BIG_STUDENT_CONTACTS_REMOVED`` (2) contacts per Tue/Thu run --
 enormously below that ceiling. The ceiling matters for staged seeding too:
-even mid-seeding, the guardrail is computed against contacts.csv's *current*
-row count, so it only gets more permissive as seeding progresses, never less.
+even mid-seeding, the guardrail is computed against the *current* contact
+count, so it only gets more permissive as seeding progresses, never less.
+
+Note on the scale-sanity gate (``safety.assert_scale_sane``, 25% tolerance):
+seeding takes students.csv from 33,621 rows to ~52,931 -- a +57% move that
+would trip that gate and, because a stale baseline is a hard SafetyViolation
+rather than a silent re-anchor, brick the district mid-seed. It doesn't,
+because ``CsvStack.counts`` reports ``students`` as distinct Student id
+(flat at 33,621 throughout) and ``contacts`` as its own derived count. If
+you ever change how students are counted, re-read that method's docstring
+first.
 """
 
 from __future__ import annotations
@@ -148,7 +171,9 @@ def estimate_seed_volume(
 
     low, high = guardians_per_student
     existing = {c.get("Student id", "") for c in stack.contacts()}
-    eligible = [s for s in stack.students() if s.get("Student id", "") not in existing]
+    eligible = [
+        s for s in stack.distinct_students() if s.get("Student id", "") not in existing
+    ]
     n = len(eligible)
 
     younger = sum(1 for s in eligible if s.get("Grade", "") in _YOUNGER_GRADES)
@@ -203,16 +228,23 @@ def seed_contacts(
     ``stack``'s *current* in-memory state, so this is safe to call
     repeatedly across staged runs), creates 1-2 guardian rows:
 
-    * ``Sequence`` is ``"1"`` for the primary guardian and ``"2"`` for the
-      second, matching the CSV's natural ordering for that student.
-    * ``Contact type`` / ``Phone type`` are drawn from
+    * Guardian order is carried by row order for that student, not by a
+      ``Sequence`` column -- the SFTP contact spec has no such column, and the
+      first guardian occupies the student's original row.
+    * ``Contact sis id`` is ``SEED<student id>-<n>``: deterministic, so a
+      re-run mints the same id rather than a duplicate guardian, and visibly
+      distinct from drift-added ``CON######`` ids. It is written once here and
+      never edited, which is what keeps each contact's Clever id stable
+      through later email/phone edits.
+    * ``Contact type`` / ``Contact phone type`` are drawn from
       ``schema.CONTACT_TYPES`` / ``schema.PHONE_TYPES``.
-    * ``Relationship`` is drawn so it's internally consistent per student --
-      sequence 1 draws from a "primary guardian" pool (Mother/Father/
-      Grandmother/Grandfather/Guardian); sequence 2 draws from the full
-      relationship pool *excluding* whatever sequence 1 got, so a single
-      student is never given two "Mother" rows (or any other duplicate).
-    * ``School id`` / ``Student id`` are copied from the student's own row.
+    * ``Contact relationship`` is drawn so it's internally consistent per
+      student -- the first guardian draws from a "primary guardian" pool
+      (Mother/Father/Grandmother/Grandfather/Guardian); the second draws from
+      the full relationship pool *excluding* whatever the first got, so a
+      single student is never given two "Mother" rows.
+    * Student-level columns are copied verbatim from the student's own row,
+      so every row for that student agrees.
     * Guardian name/email/phone come from ``content`` (the same
       ``ContentGenerator`` interface ``selection.py`` uses) -- this module
       never generates those values itself, keeping AI content generation
@@ -246,7 +278,9 @@ def seed_contacts(
 
     existing_student_ids = {c.get("Student id", "") for c in stack.contacts()}
     eligible = [
-        s for s in stack.students() if s.get("Student id", "") not in existing_student_ids
+        s
+        for s in stack.distinct_students()
+        if s.get("Student id", "") not in existing_student_ids
     ]
 
     if limit is not None:
@@ -254,12 +288,12 @@ def seed_contacts(
 
     for student in eligible:
         student_id = student.get("Student id", "")
-        school_id = student.get("School id", "")
         last_name = student.get("Last name", "")
         grade = student.get("Grade", "")
 
         count = _choose_guardian_count(rng, grade)
         count = max(only_low, min(only_high, count))
+        count = min(count, schema.MAX_CONTACTS_PER_STUDENT)
 
         used_relationships: list[str] = []
         for sequence in range(1, count + 1):
@@ -275,35 +309,60 @@ def seed_contacts(
             guardian_name = content.guardian_name(last_name)
             guardian_email = content.guardian_email(guardian_name, last_name)
             phone = content.phone()
-            contact_id = f"SEED{student_id}-{sequence}"
+            contact_sis_id = f"SEED{student_id}-{sequence}"
 
-            changes.append(
-                Change(
-                    filename=schema.CONTACTS.filename,
-                    operation=Operation.CREATE,
-                    key={"Contact id": contact_id},
-                    bucket=Bucket.BIG_STUDENT,
-                    expected_event=EventType.USERS_CREATED,
-                    event_subject=EventSubject.CONTACT,
-                    after={
-                        "School id": school_id,
-                        "Student id": student_id,
-                        "Contact name": guardian_name,
-                        "Contact type": _contact_type_for(sequence, relationship),
-                        "Relationship": relationship,
-                        "Phone": phone,
-                        "Phone type": rng.choice(schema.PHONE_TYPES),
-                        "Email": guardian_email,
-                        "Sequence": str(sequence),
-                    },
-                    note=(
-                        f"Seed: added guardian contact {guardian_name} ({contact_id}), "
-                        f"sequence {sequence}/{count}, relationship {relationship!r}, "
-                        f"for student {student.get('First name', '')} {last_name} "
-                        f"({student_id})."
-                    ),
-                    ai_generated=True,
-                )
+            contact_values = {
+                "Contact name": guardian_name,
+                "Contact type": _contact_type_for(sequence, relationship),
+                "Contact relationship": relationship,
+                "Contact phone": phone,
+                "Contact phone type": rng.choice(schema.PHONE_TYPES),
+                "Contact email": guardian_email,
+            }
+            note = (
+                f"Seed: added guardian contact {guardian_name} "
+                f"(Contact sis id {contact_sis_id}), guardian {sequence}/{count}, "
+                f"relationship {relationship!r}, for student "
+                f"{student.get('First name', '')} {last_name} ({student_id})."
             )
+
+            if sequence == 1:
+                # The student already occupies exactly one row with the contact
+                # columns blank. Fill it rather than adding a row, or the blank
+                # row survives and the student appears twice.
+                changes.append(
+                    Change(
+                        filename=schema.STUDENTS.filename,
+                        operation=Operation.UPDATE,
+                        key={"Student id": student_id, schema.CONTACT_SIS_ID_COLUMN: ""},
+                        bucket=Bucket.BIG_STUDENT,
+                        expected_event=EventType.USERS_CREATED,
+                        event_subject=EventSubject.CONTACT,
+                        before=schema.blank_contact_fields(),
+                        after={
+                            **contact_values,
+                            schema.CONTACT_SIS_ID_COLUMN: contact_sis_id,
+                        },
+                        note=note + " Filled the student's existing blank row in place.",
+                        ai_generated=True,
+                    )
+                )
+            else:
+                changes.append(
+                    Change(
+                        filename=schema.STUDENTS.filename,
+                        operation=Operation.CREATE,
+                        key={
+                            "Student id": student_id,
+                            schema.CONTACT_SIS_ID_COLUMN: contact_sis_id,
+                        },
+                        bucket=Bucket.BIG_STUDENT,
+                        expected_event=EventType.USERS_CREATED,
+                        event_subject=EventSubject.CONTACT,
+                        after={**schema.student_fields(student), **contact_values},
+                        note=note + " Added as an additional row for the same Student id.",
+                        ai_generated=True,
+                    )
+                )
 
     return changes

@@ -65,21 +65,31 @@ def _stack_with_fingerprint(fingerprint_value: str | None) -> CsvStack:
     return CsvStack({"students.csv": students}, migrated_columns={})
 
 
-#: Every core (non-engine-added) schema file, in the order push() expects to
-#: find them -- Fix 6: push() now asserts every one of these is present in
-#: local_dir before it will describe or upload anything.
-_CORE_FILENAMES = tuple(spec.filename for spec in schema.ALL_SPECS if not spec.engine_added)
+#: Every schema file, in the order push() expects to find them -- Fix 6:
+#: push() asserts every one of these is present in local_dir before it will
+#: describe or upload anything. As of 2026-08-05 that means EVERY file in
+#: ``schema.ALL_SPECS``, with no exceptions: contacts stopped being a
+#: standalone engine-owned contacts.csv (they are rows on students.csv now), so
+#: there is no longer any engine-owned file whose absence is tolerated.
+_CORE_FILENAMES = tuple(spec.filename for spec in schema.ALL_SPECS)
 
 
-def _write_stack_files(tmp_path: Path, *, with_contacts: bool = False) -> Path:
+def _write_stack_files(
+    tmp_path: Path, *, with_stale_contacts: bool = False, enrollment_rows: int = 0
+) -> Path:
     """Write a minimal, but COMPLETE, local push directory.
 
     ``students.csv`` gets one real data row (used by several tests to check
-    size/row reporting); every other core file gets a header-only
-    placeholder, since push()'s completeness gate (Fix 6) only checks
-    existence, not content. ``contacts.csv`` is engine-added and, matching
-    ``_stack_with_fingerprint``'s stack (which never populates a "contacts"
-    table), is legitimately absent unless ``with_contacts`` is requested.
+    size/row reporting); every other file gets a header-only placeholder, since
+    push()'s completeness gate (Fix 6) only checks existence, not content.
+
+    ``with_stale_contacts`` plants a leftover ``contacts.csv`` of the kind the
+    pre-2026-08-05 version of this engine wrote. It is NOT part of
+    ``schema.ALL_SPECS`` any more, so nothing should describe, count, or upload
+    it -- planting it is how the tests prove that.
+
+    ``enrollment_rows`` adds that many real data rows to enrollments.csv, for
+    the tests that need an on-disk row count the in-memory stack does not share.
     """
 
     local_dir = tmp_path / "stack"
@@ -88,12 +98,19 @@ def _write_stack_files(tmp_path: Path, *, with_contacts: bool = False) -> Path:
         "School id,Student id\r\nSCH1,STU1\r\n", encoding="utf-8"
     )
     for spec in schema.ALL_SPECS:
-        if spec.filename == "students.csv" or spec.engine_added:
+        if spec.filename == "students.csv":
             continue
         (local_dir / spec.filename).write_text(
             ",".join(spec.columns) + "\r\n", encoding="utf-8"
         )
-    if with_contacts:
+    if enrollment_rows:
+        (local_dir / "enrollments.csv").write_text(
+            ",".join(schema.ENROLLMENTS.columns)
+            + "\r\n"
+            + "".join(f"SCH1,SEC1,STU{i + 1}\r\n" for i in range(enrollment_rows)),
+            encoding="utf-8",
+        )
+    if with_stale_contacts:
         (local_dir / "contacts.csv").write_text(
             "School id,Student id,Contact id\r\nSCH1,STU1,CON1\r\n", encoding="utf-8"
         )
@@ -391,32 +408,47 @@ def test_missing_core_file_raises_on_real_push_too_before_any_upload(tmp_path: P
         )
 
 
-def test_absent_contacts_csv_with_zero_rows_is_not_an_error(tmp_path: Path):
-    """contacts.csv is engine-owned and CsvStack.save never writes it when
-    it has zero rows -- its absence here must not be flagged, since the
-    in-memory stack agrees there is nothing to lose."""
+def test_absent_file_is_flagged_even_when_the_stack_has_zero_rows_for_it(tmp_path: Path):
+    """A file with nothing in it must still EXIST on disk, header row and all.
 
-    local_dir = _write_stack_files(tmp_path, with_contacts=False)
-    assert not (local_dir / "contacts.csv").exists()
+    Retargeted 2026-08-05, and deliberately the inverse of what this test
+    asserted before. It used to cover the one tolerated exception: an absent
+    contacts.csv was fine when the in-memory stack agreed it had zero rows,
+    because that file was engine-owned and only written once it had content.
+    Contacts are rows on students.csv now, contacts.csv is gone from
+    ``schema.ALL_SPECS``, and every remaining file is a real SIS export -- so
+    "the stack says zero rows" is no longer a reason to accept an absent file.
+    Zero rows and an absent file look identical to Clever's ingest only if you
+    are the one writing the export; from Clever's side the absent file reads as
+    every row it used to have having been deleted.
+    """
+
+    local_dir = _write_stack_files(tmp_path)
+    (local_dir / "enrollments.csv").unlink()  # header-only, i.e. genuinely 0 rows
     district = _district()
-    stack = _stack_with_fingerprint(FINGERPRINT)  # no "contacts" table -> 0 rows
+    # The stack has no enrollments table at all, so it agrees there are 0 rows.
+    stack = _stack_with_fingerprint(FINGERPRINT)
+    assert stack.counts().get("enrollments", 0) == 0
 
-    result = sftp_push.push(
-        local_dir,
-        district,
-        dry_run=True,
-        stack=stack,
-        allowlist={district.sftp.username},
-    )
-    assert "contacts.csv" not in result
+    with pytest.raises(sftp_push.IncompleteStackError, match="enrollments.csv"):
+        sftp_push.push(
+            local_dir,
+            district,
+            dry_run=True,
+            stack=stack,
+            allowlist={district.sftp.username},
+        )
 
 
-def test_absent_contacts_csv_with_nonzero_stack_rows_is_flagged(tmp_path: Path):
-    """If the in-memory stack thinks contacts has rows but the file is
-    absent from disk, that is a genuine mismatch, not a legitimate
-    zero-rows omission -- it must still raise."""
+def test_absent_file_with_nonzero_stack_rows_is_flagged(tmp_path: Path):
+    """The mismatch case: the in-memory stack holds rows for a file that is not
+    on disk at all. Whatever else that is, it is not a stack that can be pushed
+    -- uploading the rest of it reads to Clever as every one of that file's
+    rows having been deleted. (Retargeted from contacts.csv, which is no longer
+    a file, onto enrollments.csv, which still is.)"""
 
-    local_dir = _write_stack_files(tmp_path, with_contacts=False)
+    local_dir = _write_stack_files(tmp_path)
+    (local_dir / "enrollments.csv").unlink()
     district = _district()
     stack = CsvStack(
         {
@@ -434,12 +466,16 @@ def test_absent_contacts_csv_with_nonzero_stack_rows_is_flagged(tmp_path: Path):
                     "Student email": f"jordan.barnes@{FINGERPRINT}",
                 }
             ],
-            "contacts.csv": [{"Contact id": "CON1"}],  # stack says 1 row exists
+            # The stack says this student is enrolled somewhere...
+            "enrollments.csv": [
+                {"School id": "SCH1", "Section id": "SEC1", "Student id": "STU1"}
+            ],
         },
         migrated_columns={},
     )
+    assert stack.counts()["enrollments"] == 1  # ...but the file is not on disk.
 
-    with pytest.raises(sftp_push.IncompleteStackError, match="contacts.csv"):
+    with pytest.raises(sftp_push.IncompleteStackError, match="enrollments.csv"):
         sftp_push.push(
             local_dir,
             district,
@@ -455,20 +491,49 @@ def test_absent_contacts_csv_with_nonzero_stack_rows_is_flagged(tmp_path: Path):
 
 
 def test_dry_run_row_count_reflects_disk_not_a_mismatched_in_memory_stack(tmp_path: Path):
-    """Reproduction: a push dir holding a stale/unrelated file (here,
-    contacts.csv with 1 real data row) while ``stack`` itself has no
-    "contacts" table at all (0 rows) used to log "0 rows" for a 1-row file.
-    Both numbers must now come from the file actually on disk."""
+    """Reproduction: a push dir whose contents don't match ``stack`` used to
+    pair an on-disk byte size with an in-memory ``stack.counts()`` row count,
+    so a 3-row file could be reported as "0 rows" -- two numbers describing two
+    different versions of the data, neither reliably the one about to be
+    uploaded. Both must come from the file actually on disk.
 
-    local_dir = _write_stack_files(tmp_path, with_contacts=True)
+    Retargeted 2026-08-05: the original mismatch was staged with a stale
+    contacts.csv, which is no longer a schema file (and so is never described
+    at all). enrollments.csv stages the same mismatch on a file that still
+    exists -- 3 rows on disk, no enrollments table whatsoever in the stack.
+    """
+
+    local_dir = _write_stack_files(tmp_path, enrollment_rows=3, with_stale_contacts=True)
     district = _district()
-    stack = _stack_with_fingerprint(FINGERPRINT)  # no contacts table -> counts()["contacts"] == 0
+    stack = _stack_with_fingerprint(FINGERPRINT)  # no enrollments table -> counts() == 0
+    assert stack.counts().get("enrollments", 0) == 0
 
     files = sftp_push._describe_files(local_dir)
     by_name = {name: (size, rows) for name, size, rows in files}
 
-    assert by_name["contacts.csv"][1] == 1  # the row that is ACTUALLY on disk
+    # The rows that are ACTUALLY on disk, not the stack's 0.
+    assert by_name["enrollments.csv"][1] == 3
     assert by_name["students.csv"][1] == 1
+    # ...and the byte size comes from the same place, so the two numbers always
+    # describe one file rather than two versions of it.
+    for filename, (size, _rows) in by_name.items():
+        assert size == (local_dir / filename).stat().st_size
+
+    # The stale contacts.csv is not a schema file, so it is neither described
+    # nor pushed -- it must not sneak into the report as a seventh file.
+    assert (local_dir / "contacts.csv").exists()
+    assert "contacts.csv" not in by_name
+    assert set(by_name) == set(_CORE_FILENAMES)
+
+    # The public dry-run path reports exactly the same set.
+    result = sftp_push.push(
+        local_dir,
+        district,
+        dry_run=True,
+        stack=stack,
+        allowlist={district.sftp.username},
+    )
+    assert sorted(result) == sorted(_CORE_FILENAMES)
 
 
 # ---------------------------------------------------------------------------
@@ -477,7 +542,7 @@ def test_dry_run_row_count_reflects_disk_not_a_mismatched_in_memory_stack(tmp_pa
 
 
 def test_real_push_writes_last_pushed_counts_as_sibling_of_local_dir(tmp_path: Path, monkeypatch):
-    local_dir = _write_stack_files(tmp_path, with_contacts=True)
+    local_dir = _write_stack_files(tmp_path, with_stale_contacts=True)
     district = _district()
     stack = _stack_with_fingerprint(FINGERPRINT)
 
@@ -497,8 +562,11 @@ def test_real_push_writes_last_pushed_counts_as_sibling_of_local_dir(tmp_path: P
 
     counts = sftp_push.read_last_pushed_counts(local_dir)
     assert counts is not None
-    assert counts["students"] == 1
-    assert counts["contacts"] == 0  # matches the stack, not the stale file on disk
+    assert counts["students"] == 1  # distinct Student ids in the STACK
+    # 0 because no students.csv row in the stack carries a "Contact sis id" --
+    # contacts are a projection over that file now, so the stale contacts.csv
+    # sitting on disk contributes nothing at all here.
+    assert counts["contacts"] == 0
 
     counts_path = local_dir.parent / sftp_push.LAST_PUSHED_COUNTS_FILENAME
     assert counts_path.exists()

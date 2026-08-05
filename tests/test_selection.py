@@ -6,6 +6,27 @@ deliberately mixed counts) built in ``tmp_path``, plus a fake content
 generator that returns canned, inspectable strings instead of calling an
 LLM.
 
+CONTACTS ARE ROWS ON students.csv (corrected 2026-08-05)
+--------------------------------------------------------
+An earlier version of this file wrote a standalone ``contacts.csv``. That
+file does not exist in Clever's SFTP spec (SFTP Instructions v2.1.1) -- a
+student with N guardians occupies N students.csv rows sharing one
+``Student id``, each carrying one guardian in the seven unsuffixed
+``schema.CONTACT_COLUMNS``; a student with none has exactly one row with
+those columns blank. ``_write_synthetic_stack`` therefore builds contacts
+through :func:`schema.expand_contact_rows`, the one function that encodes
+that pattern, rather than re-deriving it here.
+
+Two consequences run through every test below:
+
+  * A change's ``filename`` no longer tells you whether it is about a student
+    or a contact -- both are ``students.csv``. The discriminator is
+    ``Change.event_subject`` (plus ``expected_event``, since a contact ADD can
+    be a CSV ``UPDATE``); see the ``_is_*`` predicates below.
+  * "The students" is ``stack.distinct_students()``, not ``stack.students()``
+    (which is one row per contact). Picking from raw rows would weight each
+    student by their guardian count.
+
 Synthetic layout (see ``_write_synthetic_stack``):
   * SCH1: TCH1-TCH5 (TCH5 unused as a section owner -- a "spare" for
     reassignment/co-teacher tests), SEC1/SEC2 (grade 3), SEC3/SEC4 (grade 4).
@@ -16,12 +37,14 @@ Synthetic layout (see ``_write_synthetic_stack``):
     SEC6/SEC8 left empty as move targets).
   * Contacts: STU1-STU5 each have two contacts (safe to remove one),
     STU6-STU10 each have exactly one contact (must never be removed),
-    STU11-STU30 have zero contacts.
+    STU11-STU30 have zero contacts. So students.csv is 35 rows for 30
+    students -- the whole point of the row-per-contact shape.
 """
 
 from __future__ import annotations
 
 import random
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -70,6 +93,68 @@ class FakeContent:
         return f"{first}.{last}{suffix}.{student_number}@example.com".lower()
 
 
+# ---------------------------------------------------------------------------
+# Change classification helpers.
+#
+# Contacts and students now live in the SAME file, so ``c.filename`` cannot
+# tell them apart and ``c.operation`` cannot either: a contact ADD is a row
+# CREATE when the student already has guardians, but an in-place UPDATE of
+# their blank row when they had none (both predict users.created). The honest
+# discriminator is the pair (event_subject, expected_event), which is also
+# exactly what the guardrail keys on -- so these predicates read the same way
+# the engine does.
+# ---------------------------------------------------------------------------
+
+
+def _is_contact_field_edit(change) -> bool:
+    """Small-daily edit to an existing guardian's email/phone/phone type."""
+
+    return (
+        change.filename == schema.STUDENTS.filename
+        and change.event_subject is EventSubject.CONTACT
+        and change.expected_event is EventType.USERS_UPDATED
+    )
+
+
+def _is_contact_add(change) -> bool:
+    """A guardian that did not exist now does, in either CSV shape."""
+
+    return (
+        change.filename == schema.STUDENTS.filename
+        and change.event_subject is EventSubject.CONTACT
+        and change.expected_event is EventType.USERS_CREATED
+    )
+
+
+def _is_contact_removal(change) -> bool:
+    return (
+        change.filename == schema.STUDENTS.filename
+        and change.event_subject is EventSubject.CONTACT
+        and change.expected_event is EventType.USERS_DELETED
+    )
+
+
+def _is_student_field_edit(change) -> bool:
+    return (
+        change.filename == schema.STUDENTS.filename
+        and change.operation is Operation.UPDATE
+        and change.event_subject is EventSubject.STUDENT
+    )
+
+
+def _new_contact_sis_id(change) -> str:
+    """The ``Contact sis id`` a contact-add change brings into existence.
+
+    A row CREATE carries it in the key (it is half the students.csv natural
+    key); a blank-row fill carries it in ``after``, because that row's key
+    still has the sis id blank until the change is applied.
+    """
+
+    if change.operation is Operation.CREATE:
+        return change.key[schema.CONTACT_SIS_ID_COLUMN]
+    return change.after[schema.CONTACT_SIS_ID_COLUMN]
+
+
 def _write_csv(path: Path, columns: tuple[str, ...], rows: list[dict[str, str]]) -> None:
     lines = [",".join(columns)]
     for row in rows:
@@ -77,7 +162,64 @@ def _write_csv(path: Path, columns: tuple[str, ...], rows: list[dict[str, str]])
     path.write_text((CRLF.join(lines) + CRLF), encoding="utf-8")
 
 
-def _write_synthetic_stack(directory: Path, *, with_contacts: bool = True) -> None:
+#: Default guardian distribution for the synthetic stack -- see the module
+#: docstring. Anything not listed here has zero contacts, i.e. one
+#: students.csv row with the seven contact columns blank.
+_DEFAULT_CONTACT_COUNTS: dict[str, int] = {
+    **{f"STU{i}": 2 for i in range(1, 6)},
+    **{f"STU{i}": 1 for i in range(6, 11)},
+}
+
+#: Per-contact suffix, sized to ``schema.MAX_CONTACTS_PER_STUDENT`` so a test
+#: can build a student sitting exactly on the spec's ceiling.
+_CONTACT_SUFFIXES: tuple[str, ...] = ("A", "B", "C", "D", "E")
+_SYNTH_RELATIONSHIPS: tuple[str, ...] = (
+    "Mother", "Father", "Grandmother", "Grandfather", "Aunt",
+)
+
+
+def _synthetic_contacts(student: dict[str, str], count: int) -> list[dict[str, str]]:
+    """``count`` guardians for ``student``, as contact-column dicts.
+
+    Returns only the contact half of a row; ``schema.expand_contact_rows`` is
+    what pairs each one with the student half. Relationships are distinct per
+    student so the fixture never presents one child with two "Mother" rows.
+
+    ``Contact sis id`` values look like ``CTXSTU1A`` -- deliberately NOT the
+    ``CON######`` shape ``selection._IdMinter`` mints, so a test can tell a
+    pre-existing guardian from one this run created at a glance.
+    """
+
+    sid = student["Student id"]
+    return [
+        {
+            "Contact relationship": _SYNTH_RELATIONSHIPS[n],
+            "Contact type": "Parent" if n < 2 else "Emergency",
+            "Contact name": f"Guardian{sid}{_CONTACT_SUFFIXES[n]}",
+            "Contact phone": f"918-555-01{n:02d}",
+            "Contact phone type": "Mobile" if n == 0 else "Home",
+            "Contact email": f"guardian{sid}{_CONTACT_SUFFIXES[n]}@example.com".lower(),
+            schema.CONTACT_SIS_ID_COLUMN: f"CTX{sid}{_CONTACT_SUFFIXES[n]}",
+        }
+        for n in range(count)
+    ]
+
+
+def _write_synthetic_stack(
+    directory: Path,
+    *,
+    with_contacts: bool = True,
+    contact_counts: dict[str, int] | None = None,
+) -> None:
+    """Write the synthetic stack described in the module docstring.
+
+    ``contact_counts`` overrides the default guardian distribution
+    (student id -> number of contacts); students absent from it get none.
+    ``with_contacts=False`` is shorthand for "nobody has any", i.e. every
+    student is a single row with the contact columns blank -- the state
+    David's real export is actually in before ``seed.py`` has ever run.
+    """
+
     directory.mkdir(parents=True, exist_ok=True)
 
     schools = [
@@ -166,6 +308,9 @@ def _write_synthetic_stack(directory: Path, *, with_contacts: bool = True) -> No
             "_home_section": home_section,
         })
 
+    # One enrollment per STUDENT, not per students.csv row -- enrollments.csv
+    # has no contact dimension at all, so a two-guardian student must still be
+    # enrolled exactly once.
     enrollments = [
         {"School id": s["School id"], "Section id": s["_home_section"], "Student id": s["Student id"]}
         for s in students
@@ -173,31 +318,21 @@ def _write_synthetic_stack(directory: Path, *, with_contacts: bool = True) -> No
     for s in students:
         del s["_home_section"]
 
-    _write_csv(directory / "students.csv", schema.STUDENTS.columns, students)
-    _write_csv(directory / "enrollments.csv", schema.ENROLLMENTS.columns, enrollments)
+    # Expand each student into one row per contact (or a single blank-contact
+    # row if they have none). Goes through schema.expand_contact_rows rather
+    # than building rows here, so the fixture cannot drift away from the one
+    # place the row-per-contact rule actually lives.
+    counts = {} if not with_contacts else (
+        _DEFAULT_CONTACT_COUNTS if contact_counts is None else contact_counts
+    )
+    student_rows: list[dict[str, str]] = []
+    for s in students:
+        student_rows.extend(
+            schema.expand_contact_rows(s, _synthetic_contacts(s, counts.get(s["Student id"], 0)))
+        )
 
-    if with_contacts:
-        contacts = []
-        seq = 1
-        # STU1-STU5: two contacts each (safe to remove one).
-        for i in range(1, 6):
-            for suffix in ("A", "B"):
-                contacts.append({
-                    "School id": "SCH1", "Student id": f"STU{i}", "Contact id": f"CTX{i}{suffix}",
-                    "Contact name": f"Guardian{i}{suffix}", "Contact type": "Parent",
-                    "Relationship": "Mother", "Phone": "918-555-0000", "Phone type": "Mobile",
-                    "Email": f"guardian{i}{suffix}@example.com", "Sequence": str(seq),
-                })
-                seq += 1
-        # STU6-STU10: exactly one contact each (must never be removed).
-        for i in range(6, 11):
-            contacts.append({
-                "School id": "SCH1", "Student id": f"STU{i}", "Contact id": f"CTX{i}A",
-                "Contact name": f"Guardian{i}A", "Contact type": "Parent",
-                "Relationship": "Father", "Phone": "918-555-0001", "Phone type": "Home",
-                "Email": f"guardian{i}a@example.com", "Sequence": "1",
-            })
-        _write_csv(directory / "contacts.csv", schema.CONTACTS.columns, contacts)
+    _write_csv(directory / "students.csv", schema.STUDENTS.columns, student_rows)
+    _write_csv(directory / "enrollments.csv", schema.ENROLLMENTS.columns, enrollments)
 
 
 @pytest.fixture()
@@ -247,6 +382,40 @@ def _friday_plan() -> RunPlan:
         run_date=datetime.date(2026, 7, 31),
         buckets=(Bucket.SMALL_DAILY, Bucket.BIG_TEACHER),
     )
+
+
+def _monday_plan() -> RunPlan:
+    """Small daily only -- no big bucket, so the only students.csv changes are
+    the small-daily contact/student field edits."""
+
+    import datetime
+
+    return RunPlan(run_date=datetime.date(2026, 7, 27), buckets=(Bucket.SMALL_DAILY,))
+
+
+# ---------------------------------------------------------------------------
+# Fixture sanity: the synthetic stack really is row-per-contact.
+# ---------------------------------------------------------------------------
+
+
+def test_synthetic_stack_is_rows_on_students_csv_not_a_contacts_file(
+    stack_dir: Path, stack: CsvStack
+) -> None:
+    """Guards the fixture itself. If this file ever regrows a contacts.csv,
+    every contact assertion below would be testing a file Clever's SFTP
+    ingest does not read (SFTP Instructions v2.1.1)."""
+
+    assert not (stack_dir / "contacts.csv").exists()
+    # 5 students x2 + 5 students x1 + 20 students x1 blank row = 35 rows.
+    assert len(stack.students()) == 35
+    assert len(stack.distinct_students()) == 30
+    assert len(stack.contacts()) == 15
+    assert len(stack.contacts_for_student("STU1")) == 2
+    assert len(stack.contacts_for_student("STU6")) == 1
+    # A contact-less student still has exactly one row -- dropping it would
+    # delete the student.
+    assert len(stack.student_rows_for("STU11")) == 1
+    assert stack.contacts_for_student("STU11") == []
 
 
 # ---------------------------------------------------------------------------
@@ -351,8 +520,10 @@ def test_contact_removal_never_orphans_a_student(stack: CsvStack, content: FakeC
         changes = select_changes(stack, _tuesday_plan(), content, rng=random.Random(seed))
         removed_by_student: dict[str, int] = {}
         for c in changes:
-            if c.filename == "contacts.csv" and c.operation is Operation.DELETE:
-                student_id = c.before["Student id"]
+            if _is_contact_removal(c):
+                # The Student id now lives in the key (half the students.csv
+                # natural key); ``before`` carries only the contact columns.
+                student_id = c.key["Student id"]
                 removed_by_student[student_id] = removed_by_student.get(student_id, 0) + 1
 
         for student_id, removed in removed_by_student.items():
@@ -360,20 +531,59 @@ def test_contact_removal_never_orphans_a_student(stack: CsvStack, content: FakeC
             assert remaining >= 1, f"seed {seed} orphaned student {student_id}"
 
     # And explicitly: students with exactly one contact (STU6-STU10) must
-    # never appear as a removal target under any of these seeds.
+    # never appear as a removal target under any of these seeds. Removing
+    # their only contact would delete their only students.csv row, i.e. the
+    # STUDENT, not just the guardian.
     single_contact_students = {f"STU{i}" for i in range(6, 11)}
     for seed in range(30):
         changes = select_changes(stack, _tuesday_plan(), content, rng=random.Random(seed))
         for c in changes:
-            if c.filename == "contacts.csv" and c.operation is Operation.DELETE:
-                assert c.before["Student id"] not in single_contact_students
+            if _is_contact_removal(c):
+                assert c.key["Student id"] not in single_contact_students
+
+
+def test_contact_removal_is_a_row_delete_that_keeps_the_student(
+    stack_dir: Path, content: FakeContent
+) -> None:
+    """A removed guardian takes its row with it -- and nothing else.
+
+    Because a contact IS a row, this is the change shape with the most
+    dangerous failure mode in the whole engine: delete the wrong row and the
+    student disappears from the district. Applied here (against a freshly
+    loaded stack, since apply mutates) rather than merely inspected, so the
+    assertion is about the resulting CSV, not the intent.
+    """
+
+    stack = CsvStack.load(stack_dir)
+    changes = select_changes(stack, _tuesday_plan(), content, rng=random.Random(7))
+    removals = [c for c in changes if _is_contact_removal(c)]
+    assert removals, "expected at least one contact removal"
+
+    before_rows = {
+        sid: len(stack.student_rows_for(sid))
+        for sid in {c.key["Student id"] for c in removals}
+    }
+    stack.apply(removals)
+
+    for c in removals:
+        student_id = c.key["Student id"]
+        assert c.operation is Operation.DELETE
+        rows = stack.student_rows_for(student_id)
+        # The student survives, one row lighter, and the removed guardian's
+        # sis id is gone from the file.
+        assert rows, f"student {student_id} was deleted along with their guardian"
+        assert len(rows) == before_rows[student_id] - len(
+            [r for r in removals if r.key["Student id"] == student_id]
+        )
+        sis_ids = {r[schema.CONTACT_SIS_ID_COLUMN] for r in rows}
+        assert c.key[schema.CONTACT_SIS_ID_COLUMN] not in sis_ids
 
 
 def test_contacts_added_are_ai_generated_and_create_events(
     stack: CsvStack, content: FakeContent
 ) -> None:
     changes = select_changes(stack, _tuesday_plan(), content, rng=random.Random(3))
-    added = [c for c in changes if c.filename == "contacts.csv" and c.operation is Operation.CREATE]
+    added = [c for c in changes if _is_contact_add(c)]
     assert added
     for c in added:
         assert c.expected_event is EventType.USERS_CREATED
@@ -381,6 +591,361 @@ def test_contacts_added_are_ai_generated_and_create_events(
         assert c.expected_event_label == "users.created (Contacts)"
         assert c.ai_generated is True
         assert c.note
+        # The CSV operation deliberately disagrees with the Clever-level event
+        # for one of the two shapes: filling a contact-less student's blank
+        # row is an UPDATE that still creates a guardian. Both shapes are
+        # legal here; nothing else is.
+        assert c.operation in (Operation.CREATE, Operation.UPDATE)
+        assert c.after["Contact name"]
+        assert _new_contact_sis_id(c).startswith("CON")
+
+
+def test_contact_add_shapes_match_whether_the_student_already_had_guardians(
+    stack: CsvStack, content: FakeContent
+) -> None:
+    """CREATE a new row for a student who already has contacts; fill the blank
+    row in place for a student who has none.
+
+    Getting this backwards is silently destructive in one direction: CREATEing
+    a row for a contact-less student leaves their original blank row behind, so
+    the student appears twice in students.csv.
+    """
+
+    seen_shapes = set()
+    for seed in range(30):
+        changes = select_changes(stack, _tuesday_plan(), content, rng=random.Random(seed))
+        for c in changes:
+            if not _is_contact_add(c):
+                continue
+            student_id = c.key["Student id"]
+            had_contacts = bool(stack.contacts_for_student(student_id))
+            if had_contacts:
+                assert c.operation is Operation.CREATE, (seed, student_id)
+                # A new row must repeat the student's own columns verbatim.
+                for col in schema.STUDENT_LEVEL_COLUMNS:
+                    assert c.after[col] == stack.student_rows_for(student_id)[0][col]
+                assert c.key[schema.CONTACT_SIS_ID_COLUMN]
+            else:
+                assert c.operation is Operation.UPDATE, (seed, student_id)
+                # Keyed on the blank sis id, because that is what the row
+                # still carries until this change lands.
+                assert c.key[schema.CONTACT_SIS_ID_COLUMN] == ""
+                assert c.before == schema.blank_contact_fields()
+                assert c.after[schema.CONTACT_SIS_ID_COLUMN]
+                # Must not restate (and so risk rewriting) student columns.
+                assert not set(c.after) & set(schema.STUDENT_LEVEL_COLUMNS)
+            seen_shapes.add(c.operation)
+
+    assert seen_shapes == {Operation.CREATE, Operation.UPDATE}, (
+        "both add shapes should be reachable in this fixture (STU1-STU10 have "
+        "guardians, STU11-STU30 do not)"
+    )
+
+
+def test_filling_a_blank_row_does_not_duplicate_the_student(
+    stack_dir: Path, content: FakeContent
+) -> None:
+    """Applied form of the shape rule above: a contact-less student who gains
+    a guardian still occupies exactly one row afterwards."""
+
+    stack = CsvStack.load(stack_dir)
+    changes = select_changes(stack, _tuesday_plan(), content, rng=random.Random(3))
+    adds = [c for c in changes if _is_contact_add(c)]
+    fills = [c for c in adds if c.operation is Operation.UPDATE]
+    assert fills, "expected at least one blank-row fill under this seed"
+
+    stack.apply(adds)
+    for c in fills:
+        student_id = c.key["Student id"]
+        rows = stack.student_rows_for(student_id)
+        assert len(rows) == 1, f"student {student_id} was duplicated by a contact add"
+        assert schema.row_carries_contact(rows[0])
+
+
+def test_student_at_the_contact_cap_is_never_given_a_sixth_contact(
+    tmp_path: Path, content: FakeContent
+) -> None:
+    """``schema.MAX_CONTACTS_PER_STUDENT`` is a hard SFTP ceiling ("using SFTP
+    limits a student's number of contacts to 5 maximum"), so a student already
+    at the cap must be skipped rather than pushed over it. The run simply adds
+    one fewer guardian that day; it never truncates, and never emits a 6th row
+    that Clever would reject.
+    """
+
+    d = tmp_path / "capped_stack"
+    # STU1 sits exactly on the cap; STU2 has room for more; everyone else has
+    # none, so there is always an alternative target and a skip is visible as
+    # a skip rather than as "no adds were possible at all".
+    _write_synthetic_stack(
+        d, contact_counts={"STU1": schema.MAX_CONTACTS_PER_STUDENT, "STU2": 1}
+    )
+    stack = CsvStack.load(d)
+    assert len(stack.contacts_for_student("STU1")) == schema.MAX_CONTACTS_PER_STUDENT
+
+    total_adds = 0
+    for seed in range(40):
+        changes = select_changes(stack, _tuesday_plan(), content, rng=random.Random(seed))
+        adds = [c for c in changes if _is_contact_add(c)]
+        total_adds += len(adds)
+        for c in adds:
+            assert c.key["Student id"] != "STU1", (
+                f"seed {seed} would give STU1 a "
+                f"{schema.MAX_CONTACTS_PER_STUDENT + 1}th contact"
+            )
+    assert total_adds, "fixture produced no contact adds at all; test is vacuous"
+
+    # And the degenerate case: when EVERY student is at the cap there is
+    # simply nothing to add. Not an error, not a truncation -- zero adds.
+    full = tmp_path / "fully_capped_stack"
+    _write_synthetic_stack(
+        full,
+        contact_counts={f"STU{i}": schema.MAX_CONTACTS_PER_STUDENT for i in range(1, 31)},
+    )
+    full_stack = CsvStack.load(full)
+    for seed in range(10):
+        changes = select_changes(full_stack, _tuesday_plan(), content, rng=random.Random(seed))
+        assert [c for c in changes if _is_contact_add(c)] == []
+
+
+# ---------------------------------------------------------------------------
+# Contact identity stability (``Contact sis id``)
+#
+# This is the whole reason the engine mints a sis id per contact. Per Clever's
+# docs, a contact WITH an sis id keeps its Clever id across name/email/phone
+# changes; a contact WITHOUT one has its identity derived from name+email, so
+# editing the email changes the identity key itself and the ingest reads it as
+# delete-then-create rather than users.updated. An edit that quietly rewrote
+# the sis id would therefore turn every "guardian updated their email" demo
+# into a spurious users.deleted + users.created pair on the partner's feed.
+# ---------------------------------------------------------------------------
+
+
+def test_contact_sis_id_is_not_an_editable_field() -> None:
+    assert schema.CONTACT_SIS_ID_COLUMN not in schema.STUDENTS.mutable
+    assert schema.CONTACT_SIS_ID_COLUMN not in schema.CONTACT_MUTABLE_COLUMNS
+    # It IS half the natural key, which is what lets an edit name one specific
+    # guardian among a student's siblings.
+    assert schema.CONTACT_SIS_ID_COLUMN in schema.STUDENTS.key
+
+
+def test_editing_a_contact_email_leaves_its_contact_sis_id_unchanged(
+    stack_dir: Path, content: FakeContent
+) -> None:
+    stack = CsvStack.load(stack_dir)
+
+    # Static half: no contact field edit may carry the sis id in ``after`` at
+    # all (nor claim it in ``before``, which would imply it is in play).
+    edits_seen = 0
+    for seed in range(40):
+        changes = select_changes(stack, _full_week_plan(), content, rng=random.Random(seed))
+        for c in changes:
+            if not _is_contact_field_edit(c):
+                continue
+            edits_seen += 1
+            assert schema.CONTACT_SIS_ID_COLUMN not in c.after, (seed, c)
+            assert schema.CONTACT_SIS_ID_COLUMN not in c.before, (seed, c)
+            assert c.key[schema.CONTACT_SIS_ID_COLUMN], "an edit must name one contact"
+    assert edits_seen, "no contact field edits were produced; test is vacuous"
+
+    # Applied half: after an email edit lands, the SAME (Student id, Contact
+    # sis id) key still resolves to a row, and that row's email is the new one.
+    # That is exactly the property that makes the change a users.updated
+    # rather than a delete-then-create pair.
+    changes = select_changes(stack, _monday_plan(), content, rng=random.Random(5))
+    email_edits = [
+        c for c in changes if _is_contact_field_edit(c) and "Contact email" in c.after
+    ]
+    assert email_edits, "expected at least one contact email edit under this seed"
+    sis_ids_before = {r[schema.CONTACT_SIS_ID_COLUMN] for r in stack.contacts()}
+
+    stack.apply(email_edits)
+
+    for c in email_edits:
+        key = (c.key["Student id"], c.key[schema.CONTACT_SIS_ID_COLUMN])
+        row = stack.get(schema.STUDENTS.filename, key)
+        assert row is not None, f"contact {key} lost its identity on edit"
+        assert row["Contact email"] == c.after["Contact email"]
+        assert row[schema.CONTACT_SIS_ID_COLUMN] == c.key[schema.CONTACT_SIS_ID_COLUMN]
+    # No sis id anywhere in the district was invented, retired, or reshuffled.
+    assert {r[schema.CONTACT_SIS_ID_COLUMN] for r in stack.contacts()} == sis_ids_before
+
+
+# ---------------------------------------------------------------------------
+# Student-level columns must agree across a student's rows
+# ---------------------------------------------------------------------------
+
+
+def test_student_level_edit_lands_on_every_row_of_a_multi_contact_student(
+    stack_dir: Path, content: FakeContent
+) -> None:
+    """A student with N guardians occupies N rows carrying identical
+    student-level columns. A ``Middle name`` edit that landed on only one of
+    them would leave that student presenting two different values for the same
+    field in a single file -- an ambiguous record no SIS export would ever
+    produce. Selection targets one row and ``CsvStack.apply`` fans the
+    student-level half out to the siblings; this asserts the end state.
+    """
+
+    multi_row_students_exercised = 0
+    for seed in range(20):
+        # Fresh stack per seed: apply mutates, and a stack carrying seed N's
+        # edits would make seed N+1's ``before`` values wrong.
+        stack = CsvStack.load(stack_dir)
+        changes = select_changes(stack, _tuesday_plan(), content, rng=random.Random(seed))
+        student_edits = [c for c in changes if _is_student_field_edit(c)]
+        assert student_edits, seed
+        stack.apply(student_edits)
+
+        for c in student_edits:
+            student_id = c.key["Student id"]
+            rows = stack.student_rows_for(student_id)
+            if len(rows) > 1:
+                multi_row_students_exercised += 1
+            for field, value in c.after.items():
+                assert all(r[field] == value for r in rows), (seed, student_id, field)
+
+        # Nothing anywhere in the file may end up with siblings that disagree
+        # on a student-level column, edited this run or not.
+        for sid in {r["Student id"] for r in stack.students()}:
+            rows = stack.student_rows_for(sid)
+            for col in schema.STUDENT_LEVEL_COLUMNS:
+                assert len({r[col] for r in rows}) == 1, (seed, sid, col)
+
+    assert multi_row_students_exercised, (
+        "no multi-contact student was ever edited, so the fan-out path was "
+        "never exercised"
+    )
+
+
+def test_contact_level_columns_are_not_fanned_out_to_sibling_rows(
+    stack_dir: Path, content: FakeContent
+) -> None:
+    """The mirror image of the test above, and the reason fan-out is column-
+    aware rather than row-wide: contact columns are precisely what distinguishes
+    one of a student's rows from another. Copying an email edit across siblings
+    would give a student two identical guardians.
+    """
+
+    stack = CsvStack.load(stack_dir)
+
+    # Find one edit to a guardian whose student has at least one OTHER
+    # guardian that this run did not also edit -- both of a two-contact
+    # student's rows can legitimately be picked in the same run (there are 15
+    # contacts and ``SMALL_DAILY_CONTACT_FIELD_EDITS`` is 6), and a sibling
+    # that was itself an edit target proves nothing about leakage.
+    target = None
+    for seed in range(30):
+        edits = [
+            c
+            for c in select_changes(stack, _monday_plan(), content, rng=random.Random(seed))
+            if _is_contact_field_edit(c)
+        ]
+        edited_keys = {(c.key["Student id"], c.key[schema.CONTACT_SIS_ID_COLUMN]) for c in edits}
+        for c in edits:
+            student_id = c.key["Student id"]
+            untouched = [
+                r
+                for r in stack.student_rows_for(student_id)
+                if (student_id, r[schema.CONTACT_SIS_ID_COLUMN]) not in edited_keys
+            ]
+            if untouched:
+                target = c
+                break
+        if target is not None:
+            break
+
+    assert target is not None, (
+        "no seed produced an edit to one guardian of a multi-guardian student"
+    )
+    student_id = target.key["Student id"]
+    edited_sis_id = target.key[schema.CONTACT_SIS_ID_COLUMN]
+
+    # Snapshot the sibling rows' contact halves BEFORE applying, so the
+    # assertion is "untouched", not the much weaker "differs from the new
+    # value" (which a sibling would satisfy by accident).
+    before_siblings = {
+        r[schema.CONTACT_SIS_ID_COLUMN]: schema.contact_fields(r)
+        for r in stack.student_rows_for(student_id)
+        if r[schema.CONTACT_SIS_ID_COLUMN] != edited_sis_id
+    }
+    assert before_siblings
+
+    stack.apply([target])  # this ONE edit, so nothing else can explain a diff
+
+    for sibling in stack.student_rows_for(student_id):
+        sis_id = sibling[schema.CONTACT_SIS_ID_COLUMN]
+        if sis_id == edited_sis_id:
+            continue
+        assert schema.contact_fields(sibling) == before_siblings[sis_id], (
+            f"contact columns leaked from {edited_sis_id} onto sibling {sis_id}"
+        )
+
+    # ...while the edit itself did land on the row it named.
+    edited = stack.get(schema.STUDENTS.filename, (student_id, edited_sis_id))
+    assert edited is not None
+    for field, value in target.after.items():
+        assert edited[field] == value
+
+
+# ---------------------------------------------------------------------------
+# Selection draws students, not rows
+# ---------------------------------------------------------------------------
+
+
+def test_student_selection_is_unbiased_by_contact_count(
+    tmp_path: Path, content: FakeContent
+) -> None:
+    """A student with 3 guardians must not be 3x more likely to be picked.
+
+    ``stack.students()`` is one row PER CONTACT, so sampling it weights every
+    student by their guardian count -- students.csv would drift lopsidedly
+    toward the households that happen to have the most contacts, which is a
+    sampling bias with no randomization justification behind it.
+    ``distinct_students()`` is the unbiased pool.
+    """
+
+    d = tmp_path / "lopsided_stack"
+    _write_synthetic_stack(d, contact_counts={"STU1": 3, "STU2": 1})
+    stack = CsvStack.load(d)
+
+    # (1) Structural: the pool is one entry per student, whatever the rows say.
+    assert len(stack.students()) == 32  # 3 + 1 + 28 blank-contact rows
+    pool_ids = [s["Student id"] for s in stack.distinct_students()]
+    assert len(pool_ids) == len(set(pool_ids)) == 30
+    assert pool_ids.count("STU1") == 1
+
+    # (2) Behavioural: the student-edit pool really is ``distinct_students()``.
+    # Narrowing that method narrows the targets; if selection were reading raw
+    # rows instead, STU3+ would still show up here.
+    real_pool = stack.distinct_students()
+    stack.distinct_students = lambda: [  # type: ignore[method-assign]
+        s for s in real_pool if s["Student id"] in {"STU1", "STU20"}
+    ]
+    try:
+        for seed in range(20):
+            changes = select_changes(stack, _monday_plan(), content, rng=random.Random(seed))
+            targets = {c.key["Student id"] for c in changes if _is_student_field_edit(c)}
+            assert targets, seed
+            assert targets <= {"STU1", "STU20"}, (seed, targets)
+    finally:
+        del stack.distinct_students  # type: ignore[attr-defined]
+
+    # (3) Frequency: with the real pool restored, STU1 (3 rows) is picked at
+    # roughly the same rate as anybody else. Seeds are a fixed range, so this
+    # is deterministic, not a flaky statistical test -- the bound is set well
+    # below the ~3x share a row-weighted pool would produce and well above
+    # ordinary sampling noise around the 1-in-30 fair share.
+    picks: Counter[str] = Counter()
+    for seed in range(200):
+        changes = select_changes(stack, _monday_plan(), content, rng=random.Random(seed))
+        for c in changes:
+            if _is_student_field_edit(c):
+                picks[c.key["Student id"]] += 1
+    total = sum(picks.values())
+    fair_share = total / len(pool_ids)
+    row_weighted_share = total * 3 / len(stack.students())
+    assert picks["STU1"] < 1.7 * fair_share, (picks["STU1"], fair_share)
+    assert picks["STU1"] < 0.75 * row_weighted_share, (picks["STU1"], row_weighted_share)
 
 
 # ---------------------------------------------------------------------------
@@ -431,32 +996,30 @@ def test_section_reassignment_only_uses_same_school_teacher(
 
 
 def test_new_ids_never_collide_with_existing_ones(stack: CsvStack, content: FakeContent) -> None:
-    existing_contact_ids = {c["Contact id"] for c in stack.contacts()}
+    existing_contact_sis_ids = {c[schema.CONTACT_SIS_ID_COLUMN] for c in stack.contacts()}
     existing_teacher_ids = {t["Teacher id"] for t in stack.teachers()}
 
     changes = select_changes(stack, _full_week_plan(), content, rng=random.Random(9))
 
-    new_contact_ids = [
-        c.key["Contact id"]
-        for c in changes
-        if c.filename == "contacts.csv" and c.operation is Operation.CREATE
-    ]
+    # A minted sis id arrives via the key (new row) or via ``after`` (blank
+    # row filled in place) -- see ``_new_contact_sis_id``.
+    new_contact_sis_ids = [_new_contact_sis_id(c) for c in changes if _is_contact_add(c)]
     new_teacher_ids = [
         c.key["Teacher id"]
         for c in changes
         if c.filename == "teachers.csv" and c.operation is Operation.CREATE
     ]
 
-    assert new_contact_ids, "expected at least one new contact"
+    assert new_contact_sis_ids, "expected at least one new contact"
     assert new_teacher_ids, "expected at least one new teacher"
-    for cid in new_contact_ids:
-        assert cid not in existing_contact_ids
+    for cid in new_contact_sis_ids:
+        assert cid not in existing_contact_sis_ids
         assert cid.startswith("CON")
     for tid in new_teacher_ids:
         assert tid not in existing_teacher_ids
         assert tid.startswith("TCH9")
     # No collisions among ids minted within the same run, either.
-    assert len(new_contact_ids) == len(set(new_contact_ids))
+    assert len(new_contact_sis_ids) == len(set(new_contact_sis_ids))
     assert len(new_teacher_ids) == len(set(new_teacher_ids))
 
 
@@ -472,14 +1035,17 @@ def test_zero_contacts_still_produces_valid_small_daily_run(
     _write_synthetic_stack(d, with_contacts=False)
     stack = CsvStack.load(d)
     assert stack.contacts() == []
+    # Every student still has exactly one row; "no contacts" means blank
+    # contact columns, never a missing student.
+    assert len(stack.students()) == len(stack.distinct_students()) == 30
 
-    import datetime
-
-    plan = RunPlan(run_date=datetime.date(2026, 7, 27), buckets=(Bucket.SMALL_DAILY,))
+    plan = _monday_plan()
     changes = select_changes(stack, plan, content, rng=random.Random(4))
 
     assert changes  # student edits still happen
-    assert all(c.filename != "contacts.csv" for c in changes)
+    # Nothing contact-related can be produced -- there are no guardians to
+    # edit yet, which is the state of David's export before seeding.
+    assert all(c.event_subject is not EventSubject.CONTACT for c in changes)
     assert any(
         c.expected_event is EventType.USERS_UPDATED and c.event_subject is EventSubject.STUDENT
         for c in changes
@@ -495,19 +1061,20 @@ def test_no_record_touched_twice_in_one_run(stack: CsvStack, content: FakeConten
     for seed in range(20):
         changes = select_changes(stack, _full_week_plan(), content, rng=random.Random(seed))
 
-        # Small daily contact field edits: each contact at most once.
+        # Small daily contact field edits: each contact at most once. Keyed on
+        # the sis id, which is what names one guardian among a student's rows.
         contact_edits = [
-            c.key["Contact id"]
+            c.key[schema.CONTACT_SIS_ID_COLUMN]
             for c in changes
-            if c.filename == "contacts.csv" and c.operation is Operation.UPDATE
+            if _is_contact_field_edit(c)
         ]
         assert len(contact_edits) == len(set(contact_edits)), seed
 
-        # Small daily student field edits: each student at most once.
+        # Small daily student field edits: each student at most once. Filtered
+        # by event_subject, not by filename+operation -- contact edits and
+        # blank-row contact fills are also students.csv UPDATEs now.
         student_edits = [
-            c.key["Student id"]
-            for c in changes
-            if c.filename == "students.csv" and c.operation is Operation.UPDATE
+            c.key["Student id"] for c in changes if _is_student_field_edit(c)
         ]
         assert len(student_edits) == len(set(student_edits)), seed
 
@@ -522,9 +1089,7 @@ def test_no_record_touched_twice_in_one_run(stack: CsvStack, content: FakeConten
         # Contacts removed: each contact removed at most once, and no
         # contact is both field-edited and removed in the same run.
         removed_contacts = [
-            c.key["Contact id"]
-            for c in changes
-            if c.filename == "contacts.csv" and c.operation is Operation.DELETE
+            c.key[schema.CONTACT_SIS_ID_COLUMN] for c in changes if _is_contact_removal(c)
         ]
         assert len(removed_contacts) == len(set(removed_contacts)), seed
         assert not (set(contact_edits) & set(removed_contacts)), seed
@@ -545,13 +1110,14 @@ def test_no_record_touched_twice_in_one_run(stack: CsvStack, content: FakeConten
         ]
         assert len(reassigned_sections) == len(set(reassigned_sections)), seed
 
-        # Newly minted ids: no duplicate contact or teacher ids created.
-        new_contact_ids = [
-            c.key["Contact id"]
-            for c in changes
-            if c.filename == "contacts.csv" and c.operation is Operation.CREATE
-        ]
-        assert len(new_contact_ids) == len(set(new_contact_ids)), seed
+        # Newly minted ids: no duplicate contact sis ids or teacher ids
+        # created, and no student is given two new guardians in one run
+        # (which for a contact-less student would mean two changes racing for
+        # the same blank row).
+        new_contact_sis_ids = [_new_contact_sis_id(c) for c in changes if _is_contact_add(c)]
+        assert len(new_contact_sis_ids) == len(set(new_contact_sis_ids)), seed
+        students_given_contacts = [c.key["Student id"] for c in changes if _is_contact_add(c)]
+        assert len(students_given_contacts) == len(set(students_given_contacts)), seed
 
 
 def test_every_change_has_a_note(stack: CsvStack, content: FakeContent) -> None:
@@ -564,14 +1130,14 @@ def test_every_change_has_a_note(stack: CsvStack, content: FakeContent) -> None:
 # ---------------------------------------------------------------------------
 # Fix 1: no UPDATE change may be a no-op (after == before for every field).
 #
-# The audit that found this bug measured 486/486 (100%) of contacts.csv
-# "Email" edits as no-op writes -- ``guardian_email`` is a pure function of
+# The audit that found this bug measured 486/486 (100%) of contact "Contact
+# email" edits as no-op writes -- ``guardian_email`` is a pure function of
 # (name, student last name), so re-deriving it from the exact same inputs
 # during a small-daily "edit" just recomputed the identical address every
-# time. Clever's CSV diff sees nothing in that case, so no contacts.updated
-# event is ever emitted no matter how many times selection.py "changes" that
-# field. This test is the one the audit specifically called out as missing
-# -- its absence is what let the bug through in the first place.
+# time. Clever's CSV diff sees nothing in that case, so no users.updated
+# (Contacts) event is ever emitted no matter how many times selection.py
+# "changes" that field. This test is the one the audit specifically called out
+# as missing -- its absence is what let the bug through in the first place.
 # ---------------------------------------------------------------------------
 
 
@@ -591,24 +1157,25 @@ def test_every_update_change_actually_changes_a_value(
 def test_contact_email_edit_actually_changes_the_email_even_when_derivation_would_repeat(
     stack: CsvStack,
 ) -> None:
-    """Reproduces the exact audit scenario: a contact's stored Email already
-    equals what the (pure, deterministic) generator would derive for
-    attempt=0 -- e.g. because a previous edit (or the seeding step) already
-    applied that exact convention. The small-daily "email tweak" must still
-    land on a genuinely different address (via the ``attempt`` reroll)
+    """Reproduces the exact audit scenario: a contact's stored ``Contact
+    email`` already equals what the (pure, deterministic) generator would
+    derive for attempt=0 -- e.g. because a previous edit (or the seeding step)
+    already applied that exact convention. The small-daily "email tweak" must
+    still land on a genuinely different address (via the ``attempt`` reroll)
     rather than silently re-writing the same one, or (per Fix 1(b)) skip
     the field entirely rather than emit a no-op UPDATE.
     """
 
-    # Force every contact's stored Email to exactly what attempt=0 would
+    # Force every contact's stored email to exactly what attempt=0 would
     # derive, so whichever contact gets picked for a small-daily email edit
     # is guaranteed to hit the "derivation repeats the current value" case
     # the audit found -- without this, the test would pass trivially (any
-    # freshly-picked contact's real seeded Email already differs from
+    # freshly-seeded contact's email already differs from
     # "stuck@example.com", so the bug this test targets would never
-    # actually be exercised).
+    # actually be exercised). Mutating the rows in place is fine:
+    # ``stack.contacts()`` hands back the live students.csv rows.
     for c in stack.contacts():
-        c["Email"] = "stuck@example.com"
+        c["Contact email"] = "stuck@example.com"
 
     class _StuckContent(FakeContent):
         """Derives the SAME value for attempt=0 no matter which contact/
@@ -624,16 +1191,19 @@ def test_contact_email_edit_actually_changes_the_email_even_when_derivation_woul
             return f"stuck{attempt}@example.com"
 
     stuck = _StuckContent()
+    saw_an_edit = False
     for seed in range(20):
         changes = select_changes(stack, _tuesday_plan(), stuck, rng=random.Random(seed))
         email_edits = [
             c
             for c in changes
-            if c.filename == "contacts.csv" and c.operation is Operation.UPDATE and "Email" in c.after
+            if _is_contact_field_edit(c) and "Contact email" in c.after
         ]
         for c in email_edits:
-            assert c.before["Email"] == "stuck@example.com"
-            assert c.after["Email"] != c.before["Email"], (seed, c)
+            saw_an_edit = True
+            assert c.before["Contact email"] == "stuck@example.com"
+            assert c.after["Contact email"] != c.before["Contact email"], (seed, c)
+    assert saw_an_edit, "no contact email edits were exercised; test is vacuous"
 
 
 # ---------------------------------------------------------------------------
@@ -721,22 +1291,26 @@ def test_expected_event_label_matches_clevers_event_ordering_doc_phrasing() -> N
 
     from drift_engine.models import Change, EventSubject, Operation
 
+    # A contact edit is a students.csv change keyed on (Student id, Contact
+    # sis id) -- contacts have no file of their own. The label must still read
+    # "(Contacts)", which is the entire point of ``event_subject``: the file a
+    # change lands in no longer identifies the role it concerns.
     change = Change(
-        filename="contacts.csv",
+        filename="students.csv",
         operation=Operation.UPDATE,
-        key={"Contact id": "CON000001"},
+        key={"Student id": "STU100001", schema.CONTACT_SIS_ID_COLUMN: "CON000001"},
         bucket=Bucket.SMALL_DAILY,
         expected_event=EventType.USERS_UPDATED,
         event_subject=EventSubject.CONTACT,
-        before={"Email": "old@example.com"},
-        after={"Email": "new@example.com"},
+        before={"Contact email": "old@example.com"},
+        after={"Contact email": "new@example.com"},
     )
     assert change.expected_event_label == "users.updated (Contacts)"
 
     created = Change(
         filename="students.csv",
         operation=Operation.CREATE,
-        key={"Student id": "STU100001"},
+        key={"Student id": "STU100001", schema.CONTACT_SIS_ID_COLUMN: ""},
         bucket=Bucket.BIG_STUDENT,
         expected_event=EventType.USERS_CREATED,
         event_subject=EventSubject.STUDENT,
