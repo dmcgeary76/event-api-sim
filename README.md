@@ -36,7 +36,7 @@ change over time without a deliberate code change to `cadence.py`.
 | Tuesday | `small_daily` + `big_student` | Small daily, plus ~4 students moved between sections, a few new guardian contacts, and a couple of contact removals. |
 | Wednesday | `small_daily` | Small daily only. |
 | Thursday | `small_daily` + `big_student` | Same as Tuesday. |
-| Friday | `small_daily` + `big_teacher` | Small daily, plus co-teacher swaps, a primary-teacher reassignment, and one brand-new teacher added. |
+| Friday | `small_daily` + `big_teacher` | Small daily, plus co-teacher swaps, a primary-teacher reassignment, one brand-new teacher added, and one teacher removed from a different school. |
 | Saturday / Sunday | — | Skipped. No drift runs on weekends. |
 
 Big buckets **stack on top of** the small daily bucket for that day — they
@@ -517,15 +517,22 @@ environment — watch the first live push closely.
 Documented honestly rather than hidden — none of these block sandbox use,
 but all four should be understood before a first live push:
 
-1. **Teacher population has no attrition.** The Friday `big_teacher` bucket
-   adds one new teacher every week with nothing ever removing one (+26
-   teachers measured over 26 simulated weeks). Extrapolated, this eventually
-   breaches `safety.MAX_SCALE_DRIFT` (25%) — roughly 7 years out at the
-   current rate — at which point every run for that district would block on
-   the scale-sanity gate. Deliberately not fixed yet: this is follow-up work,
-   not a bug. Note this no longer needs a *new* `EventType` — `USERS_DELETED`
-   with `EventSubject.TEACHER` already exists — it just needs selection
-   logic that picks a teacher to remove.
+1. **~~Teacher population has no attrition.~~ RESOLVED 2026-08-07.** The
+   Friday `big_teacher` bucket used to add one new teacher every week with
+   nothing ever removing one (+26 teachers measured over 26 simulated
+   weeks), which extrapolated would have breached `safety.MAX_SCALE_DRIFT`
+   (25%) roughly 7 years out. `selection._big_teacher` now pairs every
+   weekly addition with a removal of one teacher from a *different* school,
+   via `cadence.BIG_TEACHER_TEACHERS_REMOVED` (1). No new `EventType` was
+   needed — `USERS_DELETED` with `EventSubject.TEACHER` already existed. The
+   removal is only ever applied to a candidate teacher whose sections can
+   all be safely handed off first: any section where they are primary
+   teacher is reassigned to another teacher at the same school, and any
+   section where they are a co-teacher has that slot cleared — so a removal
+   can never leave a section pointing at a teacher id that no longer
+   exists. If no such safe candidate exists in another school this run
+   (only possible in a school with exactly one teacher), the removal is
+   skipped for that run rather than forced through.
 2. **`eventing_verified` is still `false`.** Secure Sync / district-app
    token eventing has not been confirmed active for this district (brief
    §9). Must be verified in the Clever dashboard before any partner-facing

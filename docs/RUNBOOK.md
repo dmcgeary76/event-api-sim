@@ -272,6 +272,13 @@ going live rather than after.
 | Tuesday | 8 `sections.updated`, 3 `users.created (Contacts)`, 2 `users.deleted (Contacts)` -- plus the small daily bucket |
 | Friday | 3 `sections.updated`, 1 `users.created (Teachers)` -- plus the small daily bucket |
 
+*(Friday row predates the 2026-08-07 teacher-attrition fix -- see [Known
+limitations](../README.md#known-limitations) #1. A Friday run today also
+predicts 1 `users.deleted (Teachers)`, plus up to 1 additional
+`sections.updated` if the removed teacher had to be reassigned off a section
+first; a "spare" teacher with no sections needs no extra `sections.updated`
+at all.)*
+
 Tuesday's 2 contact deletions were attributed by the guardrail to **`contacts`**
 (not `students`) at **0.0038%** -- well below the 2% warn ceiling and nowhere
 near Clever's 10% block. That attribution is the whole point of the change
@@ -539,14 +546,15 @@ Carried over honestly from the last audit, plus one new one found during the
 2026-08-05 contacts rework -- none of these block sandbox use today, but all
 four matter before treating this as production-ready for a partner:
 
-1. **Teacher population only grows.** The Friday bucket adds one new teacher
-   a week with nothing removing one (+26 over 26 simulated weeks).
-   Extrapolated, this breaches `safety.MAX_SCALE_DRIFT` (25%) after roughly
-   7 years, at which point every run would block on the scale-sanity gate.
-   Follow-up work, not an active bug. Correction: this no longer needs a
-   *new* `EventType` — `USERS_DELETED` (with `EventSubject.TEACHER`) already
-   exists in the corrected enum — it just needs selection logic that picks a
-   teacher to remove.
+1. **~~Teacher population only grows.~~ RESOLVED 2026-08-07.** The Friday
+   bucket used to add one new teacher a week with nothing removing one (+26
+   over 26 simulated weeks), which extrapolated would have breached
+   `safety.MAX_SCALE_DRIFT` (25%) after roughly 7 years. `selection._big_teacher`
+   now removes one teacher a week too, always from a different school than
+   the one that gained one, reassigning/clearing that teacher's sections
+   first so no removal can ever leave a dangling `Teacher id`/`Teacher 2 id`
+   reference. Used the corrected enum's existing `USERS_DELETED` (with
+   `EventSubject.TEACHER`) -- no new `EventType` was needed.
 2. **`eventing_verified` is still `false`** in `config/districts.yml` --
    Secure Sync / district-app token eventing has not been confirmed for
    this district. Must be verified before partner-facing use.

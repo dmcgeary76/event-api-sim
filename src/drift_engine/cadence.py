@@ -51,6 +51,13 @@ BIG_TEACHER_COTEACHER_CHANGES = 2
 BIG_TEACHER_SECTION_REASSIGNMENTS = 1
 #: Big teacher bucket (Fri) -- brand new teachers added to the district.
 BIG_TEACHER_NEW_TEACHERS = 1
+#: Big teacher bucket (Fri) -- teachers removed, always from a DIFFERENT
+#: school than the one that gained a teacher this run (see
+#: ``selection._big_teacher``). Paired 1-for-1 with the addition above so
+#: the district's total teacher headcount stays roughly flat instead of
+#: only ever growing -- closes the "no attrition" known limitation flagged
+#: when this engine shipped (README "Known limitations" #1).
+BIG_TEACHER_TEACHERS_REMOVED = 1
 
 
 # ---------------------------------------------------------------------------

@@ -95,6 +95,16 @@ see below on why this is not a distinct `teachers.created` event) — see
 the schema but are not currently written to by any selection logic in this
 build; only row creation happens today.
 
+Rows are also **deleted** here on Fridays, one per run
+(`cadence.BIG_TEACHER_TEACHERS_REMOVED`), as of 2026-08-07 — paired 1-for-1
+with the new-teacher creation above so total teacher headcount stays roughly
+flat instead of only ever growing (see README "Known limitations" #1). The
+removed teacher is always at a *different* school than the one that gained a
+teacher this run, and is only ever picked once every `sections.csv` row that
+lists them as primary (`Teacher id`) or co-teacher (`Teacher 2 id`) has
+somewhere else to point — see `selection._big_teacher` for the reassign/clear
+logic that guarantees this.
+
 ### staff.csv
 
 | | |
@@ -114,7 +124,9 @@ build; only row creation happens today.
 | Mutable columns | `Teacher id`, `Teacher 2 id` |
 
 `Teacher 2 id` is engine-added (see below). Both mutable columns drive the
-Friday `big_teacher` bucket (co-teacher swap, primary teacher reassignment).
+Friday `big_teacher` bucket (co-teacher swap, primary teacher reassignment,
+and — as of 2026-08-07 — the forced reassignment/clear a teacher removal
+requires before that teacher's row can be deleted).
 
 **Numbered suffixes are real here, and only here.** SFTP Instructions v2.1.1
 gives `sections.csv` co-teacher slots `Teacher 2 id` through `Teacher 10 id`;

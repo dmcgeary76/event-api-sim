@@ -47,6 +47,7 @@ from .cadence import (
     BIG_TEACHER_COTEACHER_CHANGES,
     BIG_TEACHER_NEW_TEACHERS,
     BIG_TEACHER_SECTION_REASSIGNMENTS,
+    BIG_TEACHER_TEACHERS_REMOVED,
     SMALL_DAILY_CONTACT_FIELD_EDITS,
     SMALL_DAILY_STUDENT_FIELD_EDITS,
 )
@@ -722,10 +723,15 @@ def _big_teacher(
 
     # -- New teachers ------------------------------------------------------
     schools = stack.schools()
+    # Schools that gain a teacher this run -- the attrition pass below must
+    # never remove from one of these (brief: removal is "always from another
+    # school"), so it is tracked even though today's magnitude is always 1.
+    schools_gained: set[str] = set()
     for _ in range(BIG_TEACHER_NEW_TEACHERS):
         if not schools:
             break
         school = rng.choice(schools)
+        schools_gained.add(school["School id"])
         first, last = content.teacher_name()
         teacher_id = id_minter.mint_teacher_id(stack)
         # Fix 7: delegate to the content module's own ``teacher_email``
@@ -758,6 +764,162 @@ def _big_teacher(
                     f"to school {school['School id']}."
                 ),
                 ai_generated=True,
+            )
+        )
+
+    # -- Teacher attrition (paired with the addition above) -----------------
+    # Closes the "no attrition" known limitation: with nothing ever removing
+    # a teacher, headcount only ever grew, eventually breaching
+    # safety.MAX_SCALE_DRIFT. Removing one teacher a week -- always from a
+    # DIFFERENT school than the one that just gained one, so no single school
+    # is ever seen both losing and gaining a teacher in the same run --
+    # stabilizes the district's total teacher count without touching the
+    # small-daily/big-student cadence.
+    #
+    # A teacher can be a section's primary ("Teacher id", required) or its
+    # co-teacher ("Teacher 2 id", optional). Deleting one who still holds
+    # either would leave a dangling reference no downstream ingest could
+    # resolve -- the exact class of bug already fixed once for contacts/
+    # students (README "KNOWN BLOCKER"). So a candidate is only removed once
+    # every section referencing them has somewhere else to point: primary
+    # slots are reassigned to another same-school teacher, co-teacher slots
+    # are simply cleared. A candidate with no safe reassignment target for
+    # some section (only possible in a school with exactly one teacher) is
+    # skipped in favor of the next candidate, never forced through.
+    #
+    # ``section_overrides`` folds in every sections.csv Teacher id/Teacher 2
+    # id change already staged above (co-teacher swaps, primary
+    # reassignments) so a teacher who was JUST assigned somewhere earlier in
+    # THIS run is never mistaken for free of sections, and a section already
+    # touched for a given field this run (``coteacher_touched``/
+    # ``reassign_touched``) is never selected again for that same field --
+    # the same "each field touched at most once per run" rule every other
+    # bucket in this module already follows.
+    section_overrides: dict[str, dict[str, str]] = {}
+    for c in changes:
+        if c.filename == schema.SECTIONS.filename and c.operation is Operation.UPDATE:
+            section_overrides.setdefault(c.key["Section id"], {}).update(c.after)
+
+    def _effective_teacher_fields(section: dict) -> tuple[str, str]:
+        override = section_overrides.get(section["Section id"], {})
+        primary = override.get("Teacher id", section.get("Teacher id", ""))
+        co = override.get("Teacher 2 id", section.get("Teacher 2 id", ""))
+        return primary, co
+
+    removed_teacher_touched = _touched(touched, "teachers.csv:removed")
+    removal_pool = [
+        t
+        for t in _shuffled(rng, stack.teachers())
+        if t.get("School id", "") not in schools_gained
+        and t["Teacher id"] not in removed_teacher_touched
+    ]
+
+    for _ in range(BIG_TEACHER_TEACHERS_REMOVED):
+        removed_teacher: dict | None = None
+        staged: list[Change] = []
+
+        for candidate in removal_pool:
+            teacher_id = candidate["Teacher id"]
+            if teacher_id in removed_teacher_touched:
+                continue
+            school_id = candidate.get("School id", "")
+            candidate_changes: list[Change] = []
+            safe = True
+
+            for section in stack.sections():
+                primary, co = _effective_teacher_fields(section)
+                section_id = section["Section id"]
+
+                if primary == teacher_id:
+                    if section_id in reassign_touched:
+                        safe = False
+                        break
+                    replacements = _same_school_teachers(
+                        stack, school_id, exclude={teacher_id, co} - {""}
+                    )
+                    if not replacements:
+                        safe = False
+                        break
+                    new_primary = rng.choice(replacements)["Teacher id"]
+                    candidate_changes.append(
+                        Change(
+                            filename=schema.SECTIONS.filename,
+                            operation=Operation.UPDATE,
+                            key={"Section id": section_id},
+                            bucket=Bucket.BIG_TEACHER,
+                            expected_event=EventType.SECTIONS_UPDATED,
+                            event_subject=EventSubject.SECTION,
+                            before={"Teacher id": teacher_id},
+                            after={"Teacher id": new_primary},
+                            note=(
+                                f"Big teacher: reassigned section {section_id} "
+                                f"({section.get('Name', '')}) from departing "
+                                f"teacher {teacher_id} to {new_primary!r} ahead "
+                                "of removal."
+                            ),
+                        )
+                    )
+                    continue
+
+                if co == teacher_id:
+                    if section_id in coteacher_touched:
+                        safe = False
+                        break
+                    candidate_changes.append(
+                        Change(
+                            filename=schema.SECTIONS.filename,
+                            operation=Operation.UPDATE,
+                            key={"Section id": section_id},
+                            bucket=Bucket.BIG_TEACHER,
+                            expected_event=EventType.SECTIONS_UPDATED,
+                            event_subject=EventSubject.SECTION,
+                            before={"Teacher 2 id": teacher_id},
+                            after={"Teacher 2 id": ""},
+                            note=(
+                                f"Big teacher: cleared departing co-teacher "
+                                f"{teacher_id} from section {section_id} "
+                                f"({section.get('Name', '')})."
+                            ),
+                        )
+                    )
+
+            if not safe:
+                continue
+
+            removed_teacher = candidate
+            staged = candidate_changes
+            break
+
+        if removed_teacher is None:
+            continue  # No safe candidate this run; skip rather than orphan a section.
+
+        teacher_id = removed_teacher["Teacher id"]
+        removed_teacher_touched.add(teacher_id)
+        for staged_change in staged:
+            section_overrides.setdefault(staged_change.key["Section id"], {}).update(
+                staged_change.after
+            )
+            if "Teacher id" in staged_change.after:
+                reassign_touched.add(staged_change.key["Section id"])
+            if "Teacher 2 id" in staged_change.after:
+                coteacher_touched.add(staged_change.key["Section id"])
+        changes.extend(staged)
+        changes.append(
+            Change(
+                filename=schema.TEACHERS.filename,
+                operation=Operation.DELETE,
+                key={"Teacher id": teacher_id},
+                bucket=Bucket.BIG_TEACHER,
+                expected_event=EventType.USERS_DELETED,
+                event_subject=EventSubject.TEACHER,
+                before={col: removed_teacher.get(col, "") for col in schema.TEACHERS.columns},
+                note=(
+                    f"Big teacher: removed teacher "
+                    f"{removed_teacher.get('First name', '')} "
+                    f"{removed_teacher.get('Last name', '')} ({teacher_id}) from "
+                    f"school {removed_teacher.get('School id', '')}, balancing "
+                    "the new teacher added elsewhere this run."
+                ),
             )
         )
 

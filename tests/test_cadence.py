@@ -136,3 +136,4 @@ def test_fixed_magnitude_constants_are_the_documented_values():
     assert cadence.BIG_TEACHER_COTEACHER_CHANGES == 2
     assert cadence.BIG_TEACHER_SECTION_REASSIGNMENTS == 1
     assert cadence.BIG_TEACHER_NEW_TEACHERS == 1
+    assert cadence.BIG_TEACHER_TEACHERS_REMOVED == 1

@@ -4,6 +4,39 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.3.0] - 2026-08-07
+
+### Added
+
+- **Teacher attrition, paired 1-for-1 with the weekly new-teacher add.**
+  Resolves the "Teacher population has no attrition" known limitation flagged
+  when this engine shipped (the Friday `big_teacher` bucket only ever grew
+  the teacher count, which would have breached `safety.MAX_SCALE_DRIFT` (25%)
+  roughly 7 years out at the observed rate). New
+  `cadence.BIG_TEACHER_TEACHERS_REMOVED` (1) drives `selection._big_teacher`
+  to remove one teacher every Friday, always from a **different school**
+  than the one that gained a teacher that same run, using the existing
+  `EventType.USERS_DELETED` / `EventSubject.TEACHER` (no new event type was
+  needed -- the enum already covered it after the 2026-08-03 correction).
+  A teacher is only ever removed once every `sections.csv` row referencing
+  them has somewhere else to point: any section where they are the primary
+  teacher (`Teacher id`) is reassigned to another same-school teacher first,
+  and any section where they are a co-teacher (`Teacher 2 id`) has that slot
+  cleared -- both staged as ordinary `sections.updated` changes ahead of the
+  teacher's own `users.deleted (Teachers)` delete. This is the same class of
+  integrity bug fixed once already for contacts/students (see the 0.2.0
+  entry below): a removal that left a section pointing at a nonexistent
+  teacher id would have been silently wrong on ingest. If no candidate in
+  another school can be reassigned safely this run (only possible in a
+  school with exactly one teacher), the removal is skipped for that run
+  rather than forced through an unsafe state.
+  Verified with a 200-seed sweep of `select_changes` plus new targeted unit
+  tests (`tests/test_selection.py`): every run produces exactly one teacher
+  create and one teacher delete, the delete's school always differs from the
+  create's, applying the resulting changes never leaves a section referencing
+  a deleted teacher id, and no section is touched twice for the same field
+  in one run.
+
 ## [0.2.1] - 2026-08-05
 
 ### Fixed

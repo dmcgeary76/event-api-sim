@@ -991,6 +991,98 @@ def test_section_reassignment_only_uses_same_school_teacher(
 
 
 # ---------------------------------------------------------------------------
+# Teacher attrition (paired with the weekly new-teacher add)
+# ---------------------------------------------------------------------------
+
+
+def test_teacher_removal_is_paired_one_for_one_with_the_addition(
+    stack: CsvStack, content: FakeContent
+) -> None:
+    changes = select_changes(stack, _friday_plan(), content, rng=random.Random(5))
+    creates = [
+        c for c in changes if c.filename == "teachers.csv" and c.operation is Operation.CREATE
+    ]
+    deletes = [
+        c for c in changes if c.filename == "teachers.csv" and c.operation is Operation.DELETE
+    ]
+    assert len(creates) == 1
+    assert len(deletes) == 1
+
+
+def test_teacher_removal_always_comes_from_a_different_school_than_the_addition(
+    stack: CsvStack, content: FakeContent
+) -> None:
+    for seed in range(30):
+        changes = select_changes(stack, _friday_plan(), content, rng=random.Random(seed))
+        created = next(
+            c
+            for c in changes
+            if c.filename == "teachers.csv" and c.operation is Operation.CREATE
+        )
+        deleted = next(
+            (
+                c
+                for c in changes
+                if c.filename == "teachers.csv" and c.operation is Operation.DELETE
+            ),
+            None,
+        )
+        if deleted is None:
+            continue  # Graceful skip (no safe candidate) is allowed; nothing to check.
+        assert deleted.before["School id"] != created.after["School id"], seed
+
+
+def test_teacher_removal_never_leaves_a_section_pointing_at_a_deleted_teacher(
+    stack_dir: Path, stack: CsvStack, content: FakeContent
+) -> None:
+    """The exact class of bug the contacts.csv rework fixed once already
+    (README "KNOWN BLOCKER") -- a removed teacher must never stay referenced
+    as a section's primary or co-teacher."""
+
+    for seed in range(30):
+        changes = select_changes(stack, _friday_plan(), content, rng=random.Random(seed))
+        deleted = next(
+            (
+                c
+                for c in changes
+                if c.filename == "teachers.csv" and c.operation is Operation.DELETE
+            ),
+            None,
+        )
+        if deleted is None:
+            continue
+        deleted_id = deleted.key["Teacher id"]
+
+        applied = CsvStack.load(stack_dir)
+        applied.apply(changes)
+        remaining_ids = {t["Teacher id"] for t in applied.teachers()}
+        assert deleted_id not in remaining_ids, seed
+        for section in applied.sections():
+            assert section.get("Teacher id") != deleted_id, (seed, section["Section id"])
+            assert section.get("Teacher 2 id") != deleted_id, (seed, section["Section id"])
+
+
+def test_teacher_removal_reassignments_only_use_same_school_teachers(
+    stack: CsvStack, content: FakeContent
+) -> None:
+    section_school = {s["Section id"]: s["School id"] for s in stack.sections()}
+    teacher_school = {t["Teacher id"]: t["School id"] for t in stack.teachers()}
+
+    for seed in range(30):
+        changes = select_changes(stack, _friday_plan(), content, rng=random.Random(seed))
+        for c in changes:
+            if c.filename != "sections.csv":
+                continue
+            section_id = c.key["Section id"]
+            new_primary = c.after.get("Teacher id")
+            if new_primary:
+                assert teacher_school[new_primary] == section_school[section_id], seed
+            new_co = c.after.get("Teacher 2 id")
+            if new_co:
+                assert teacher_school[new_co] == section_school[section_id], seed
+
+
+# ---------------------------------------------------------------------------
 # ID minting
 # ---------------------------------------------------------------------------
 
