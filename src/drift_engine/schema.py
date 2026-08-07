@@ -246,6 +246,21 @@ ENROLLMENTS = FileSpec(
 # previous standalone contacts.csv spec was removed on 2026-08-05 because
 # Clever's SFTP ingest has no such file and would have ignored it.
 
+#: Files Clever's own SFTP spec (v2.2.0, confirmed against Clever's internal
+#: district-system-settings tooling on 2026-08-05) does NOT require to be
+#: present for a sync to process: "all 5 must be uploaded at the same time"
+#: names only schools/students/teachers/sections/enrollments. staff.csv is
+#: documented as optional ("Staff are non-teachers not in class rosters").
+#:
+#: NOT the same concept as the removed ``FileSpec.engine_added`` flag that
+#: `contacts.csv` used to set: that flag meant "this ENGINE owns creating this
+#: file"; contacts are gone entirely now, not optional. This flag means
+#: "CLEVER'S OWN SPEC does not require this file to exist" -- a real SIS
+#: export can legitimately omit it. Kept as its own set rather than reusing
+#: any old mechanism so the two reasons a file might be absent stay distinct
+#: in the code, not just in comments.
+OPTIONAL_FILES: frozenset[str] = frozenset({"staff.csv"})
+
 
 #: Every file in the stack, in a stable order.
 ALL_SPECS: tuple[FileSpec, ...] = (

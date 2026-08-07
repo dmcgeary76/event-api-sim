@@ -40,6 +40,12 @@ For each file: exact column order as the engine writes it, the natural key
 used to look up/apply changes, which columns the engine is allowed to
 mutate, and the Clever record type it feeds (used for guardrail accounting).
 
+One of the six, `staff.csv`, is optional per Clever's own SFTP spec (v2.2.0):
+only schools/students/teachers/sections/enrollments must be uploaded
+together. `schema.OPTIONAL_FILES` is the one exception to "every file in
+`ALL_SPECS` is required" -- see [README.md](../README.md#data-integrity-csv-load--save--push)
+for the mechanics.
+
 ### schools.csv
 
 | | |
@@ -263,12 +269,14 @@ An **unrecognized** column is a hard `ValueError` too, for the mirror-image
 reason: silently dropping a column this engine does not understand would lose
 that data on the next save.
 
-And **every file in `schema.ALL_SPECS` must be present on disk,
-unconditionally.** `FileSpec.engine_added` -- the flag that let a file be
-legitimately absent on load -- has been removed. It only ever existed for the
-old `contacts.csv`, and keeping it would have contradicted
-`sftp_push._assert_stack_complete`, which requires all six files. `save()`
-writes every one of them on every save, even a file with zero rows. A useful
+And **every file in `schema.ALL_SPECS` must be present on disk, except
+`schema.OPTIONAL_FILES`.** `FileSpec.engine_added` -- the flag that let a file
+be legitimately absent on load -- has been removed. It only ever existed for
+the old `contacts.csv`. Its replacement, `OPTIONAL_FILES` (currently just
+`staff.csv`, per Clever's own SFTP spec), is narrower and for a different
+reason: not "this engine owns the file" but "Clever's spec says the file is
+optional." `save()` writes every non-optional file on every save, even one
+with zero rows; an optional file with zero rows is skipped. A useful
 side effect: because `save()` promotes a freshly staged directory containing
 only `ALL_SPECS`, a stale `contacts.csv` left behind by the pre-2026-08-05
 version of this engine cleans itself up locally on the next save. It was never

@@ -4,6 +4,47 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.1] - 2026-08-05
+
+### Fixed
+
+- **`staff.csv` is now optional, matching Clever's real SFTP spec.**
+  Confirmed against Clever's SFTP specification v2.2.0 (fetched directly from
+  Clever's internal tooling): only five files must be uploaded together --
+  schools, students, teachers, sections, enrollments. `staff.csv` is
+  documented as optional ("Staff are non-teachers not in class rosters").
+  0.2.0 tightened `sftp_push._assert_stack_complete` to require every file in
+  `schema.ALL_SPECS` unconditionally, which closed the real `contacts.csv`
+  loophole but incidentally made `staff.csv` stricter than Clever's own spec.
+  New `schema.OPTIONAL_FILES` (currently just `staff.csv`) is wired into
+  `CsvStack.load` (absent file loads as zero rows), `CsvStack.save` (a
+  zero-row optional file is not written), and `sftp_push._assert_stack_complete`
+  (absence tolerated only when the in-memory stack agrees it is genuinely
+  empty). Distinct from the pre-0.2.0 `contacts.csv` exception on purpose:
+  that one existed because the ENGINE owned the file; this one exists because
+  CLEVER'S OWN SPEC says the file is optional. No effect on the real Tulsa
+  stack, which always has 280 staff rows.
+- Independently re-confirmed the 0.2.0 contacts rework against Clever's own
+  internal district-system-settings tooling: the `Students` export's field
+  list carries exactly `Contact_name`, `Contact_relationship`, `Contact_type`,
+  `Contact_phone`, `Contact_phone_type`, `Contact_email`, `Contact_sis_id` as
+  columns on the student record, matching what was implemented. Also surfaced
+  `Contact_pickup_rights`, a field absent from the public SFTP spec text --
+  correctly left unimplemented, since adding an undocumented column would be
+  rejected by this engine's own unknown-column check (and likely by Clever's
+  real ingest too).
+
+### Verified against the live district
+
+Checked the real Tulsa replica sandbox (district id `6a6a50609ce9a77c08b6587e`)
+directly via Clever's internal tooling, not just simulated locally: no sync
+hold, sync engine active and unpaused, last successful/attempted sync
+2026-07-29 (the original baseline load: 33,621 students created, 0 contacts,
+0 student_contacts -- confirms nothing contact-related has ever synced).
+Secure Sync / Events API eventing activation is not visible through any of
+these tools and still requires a direct check in the Clever dashboard;
+`eventing_verified` remains `false`.
+
 ## [0.2.0] - 2026-08-05
 
 Resolves the project's one remaining hard blocker: contacts were the wrong CSV

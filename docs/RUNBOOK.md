@@ -15,9 +15,13 @@ engine. See [README.md](../README.md) for what the project is, and
    content and logs that it did so; nothing fails for want of a key.
 3. Place the district's initial CSV export in
    `state/<district-id>/baseline/` (currently
-   `state/steadfast-backpack-8880/baseline/`). **All six files must be
-   present**: `schools.csv`, `students.csv`, `teachers.csv`, `staff.csv`,
-   `sections.csv`, `enrollments.csv`. There is no `contacts.csv` -- guardian
+   `state/steadfast-backpack-8880/baseline/`). **Five files are always
+   required**: `schools.csv`, `students.csv`, `teachers.csv`, `sections.csv`,
+   `enrollments.csv` -- this is Clever's own SFTP spec (v2.2.0), which
+   requires exactly these five together. `staff.csv` is optional per that
+   same spec (`schema.OPTIONAL_FILES`); the real Tulsa export has one, with
+   280 rows, so this rarely matters in practice but a district legitimately
+   without staff data can omit it. There is no `contacts.csv` -- guardian
    contacts are columns on `students.csv` (see
    [SCHEMA.md](SCHEMA.md#contacts-are-rows-on-studentscsv-confirmed-2026-08-05)),
    and those seven columns are engine-added, so a fresh SIS export simply

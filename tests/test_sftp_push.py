@@ -440,6 +440,58 @@ def test_absent_file_is_flagged_even_when_the_stack_has_zero_rows_for_it(tmp_pat
         )
 
 
+def test_absent_optional_staff_csv_is_tolerated_when_stack_agrees_it_is_empty(
+    tmp_path: Path,
+):
+    """staff.csv is the one file in ``schema.OPTIONAL_FILES`` -- Clever's own
+    SFTP spec (v2.2.0), not this engine, says it need not exist. An absent
+    staff.csv must NOT raise when the in-memory stack agrees it has zero staff
+    rows. This is a narrower exception than the pre-2026-08-05 contacts.csv
+    one: it applies to exactly one file, for a documented spec reason, not a
+    "this engine owns the file" reason."""
+
+    local_dir = _write_stack_files(tmp_path)
+    (local_dir / "staff.csv").unlink()
+    district = _district()
+    stack = _stack_with_fingerprint(FINGERPRINT)
+    assert stack.counts().get("staff", 0) == 0
+
+    result = sftp_push.push(
+        local_dir,
+        district,
+        dry_run=True,
+        stack=stack,
+        allowlist={district.sftp.username},
+    )
+    assert "staff.csv" not in set(result)
+
+
+def test_absent_optional_staff_csv_with_nonzero_stack_rows_is_still_flagged(
+    tmp_path: Path,
+):
+    """The mismatch case for the new exception: the stack claims staff rows
+    exist, but staff.csv is absent from disk. The optional-file exception
+    only covers a GENUINE absence of staff data, not a stack that disagrees
+    with what's on disk -- the same principle as the general mismatch test
+    below, narrowed to the one file that is otherwise allowed to be absent."""
+
+    local_dir = _write_stack_files(tmp_path)
+    (local_dir / "staff.csv").unlink()
+    district = _district()
+    stack = _stack_with_fingerprint(FINGERPRINT)
+    stack._tables["staff.csv"] = [{"Staff id": "STF1"}]
+    assert stack.counts()["staff"] == 1
+
+    with pytest.raises(sftp_push.IncompleteStackError, match="staff.csv"):
+        sftp_push.push(
+            local_dir,
+            district,
+            dry_run=True,
+            stack=stack,
+            allowlist={district.sftp.username},
+        )
+
+
 def test_absent_file_with_nonzero_stack_rows_is_flagged(tmp_path: Path):
     """The mismatch case: the in-memory stack holds rows for a file that is not
     on disk at all. Whatever else that is, it is not a stack that can be pushed

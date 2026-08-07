@@ -298,6 +298,51 @@ def test_contacts_csv_is_never_written_and_a_stale_one_is_dropped_by_save(
     assert {p.name for p in out_dir.iterdir()} == {spec.filename for spec in schema.ALL_SPECS}
 
 
+def test_absent_optional_staff_csv_loads_as_zero_rows_not_an_error(
+    tmp_path: Path, baseline_dir: Path
+) -> None:
+    """staff.csv is in ``schema.OPTIONAL_FILES`` because Clever's own SFTP
+    spec (v2.2.0) does not require it -- a district with no staff records can
+    simply omit the file. This is NOT the pre-2026-08-05 ``contacts.csv``
+    exception (that flag meant "this engine owns creating the file"); it
+    exists because Clever's spec, not this engine, says the file is optional.
+    An absent staff.csv must load as zero rows, the same outcome as an absent
+    engine-owned file used to produce, but for a different reason."""
+
+    out_dir = tmp_path / "no_staff"
+    out_dir.mkdir()
+    for name in ("schools.csv", "students.csv", "teachers.csv", "sections.csv", "enrollments.csv"):
+        (out_dir / name).write_bytes((baseline_dir / name).read_bytes())
+    # Deliberately no staff.csv at all.
+
+    stack = CsvStack.load(out_dir)
+    assert stack.staff() == []
+    assert stack.counts()["staff"] == 0
+
+
+def test_save_omits_staff_csv_when_it_has_zero_rows(tmp_path: Path, baseline_dir: Path) -> None:
+    """The mirror of the load-side test above: if the in-memory stack has no
+    staff rows, ``save`` should not manufacture a header-only staff.csv just
+    because this engine happened to touch the directory. Non-optional files
+    are always written, even empty -- omitting one of THOSE reads to Clever
+    as every row having been deleted. staff.csv is the one exception, and only
+    when it is genuinely empty."""
+
+    stack = CsvStack.load(baseline_dir)
+    # Force zero staff rows without touching any other table.
+    stack._tables[schema.STAFF.filename] = []
+
+    out_dir = tmp_path / "out"
+    written = stack.save(out_dir)
+
+    assert "staff.csv" not in {p.name for p in written}
+    assert not (out_dir / "staff.csv").exists()
+    # Every non-optional file must still be present.
+    for spec in schema.ALL_SPECS:
+        if spec.filename not in schema.OPTIONAL_FILES:
+            assert (out_dir / spec.filename).exists(), spec.filename
+
+
 def test_students_csv_without_contact_columns_loads_as_zero_contacts(
     baseline_dir: Path,
 ) -> None:

@@ -186,10 +186,21 @@ so a future reader can always tell a spec fact from one of our inferences.
   encodes the row-per-contact pattern.** Given how thin the available
   contacts coverage is, that is the deliberate hedge: if the spec turns out
   to vary, correcting that function is the whole change.
-- **`FileSpec.engine_added` is gone.** Every file in `schema.ALL_SPECS` (now
-  **six**, not seven) is unconditionally required on disk, and `save()`
-  always writes each one even with zero rows. The "this file may legitimately
-  be absent" escape hatch only ever existed for `contacts.csv`.
+- **`FileSpec.engine_added` is gone.** `schema.ALL_SPECS` is now **six** files,
+  not seven, and every one of them is a real SIS export. `save()` always
+  writes each one, even with zero rows -- except `staff.csv` (see below),
+  which Clever's own spec, not this engine, says may be absent.
+- **`staff.csv` is optional, per Clever's own spec (added 0.2.1).** Clever's
+  SFTP specification (v2.2.0) requires only five files together --
+  schools, students, teachers, sections, enrollments -- and documents
+  `staff.csv` as optional. `schema.OPTIONAL_FILES` (currently just
+  `staff.csv`) is the one exception to "every file unconditionally required":
+  an absent `staff.csv` loads as zero rows, and `save()`/`sftp_push` tolerate
+  its absence only when the in-memory stack agrees it is genuinely empty.
+  Deliberately a different mechanism from the old `contacts.csv` exception:
+  that one existed because the engine owned the file; this one exists because
+  Clever's spec says the file is optional. Has no effect on the real Tulsa
+  stack, which always has 280 staff rows.
 
 Two source bugs were found and fixed while doing this work, both latent before
 the rework:
@@ -414,12 +425,14 @@ use a fixed, documented exit-code contract:
   dropping a column this engine does not understand would lose that data on
   the next save. See [docs/RUNBOOK.md](docs/RUNBOOK.md) for what this means
   when dropping in a new CSV export.
-- **Every file in `schema.ALL_SPECS` is required, unconditionally.** There is
-  no longer a `FileSpec.engine_added` flag letting a file be legitimately
-  absent on load -- that only ever existed for the removed `contacts.csv`, and
-  keeping it would have contradicted `sftp_push`'s stack-completeness
-  assertion. `save()` writes all six files every time, even one with zero
-  rows.
+- **Every file in `schema.ALL_SPECS` is required, except `schema.OPTIONAL_FILES`.**
+  There is no longer a `FileSpec.engine_added` flag letting a file be
+  legitimately absent on load -- that only ever existed for the removed
+  `contacts.csv`. Its replacement, `OPTIONAL_FILES` (currently just
+  `staff.csv`), is narrower and spec-driven rather than engine-driven: see
+  "Confirmed, then fixed" above. `save()` writes every non-optional file
+  every time, even one with zero rows; an optional file with zero rows is
+  not written at all.
 - `CsvStack.save` is **all-or-nothing** across the whole stack — every file
   is written to a staging directory first, and only promoted into place
   (one atomic rename) once every file has written successfully. A failure

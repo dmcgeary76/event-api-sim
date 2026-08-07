@@ -75,19 +75,22 @@ class SftpTransferError(RuntimeError):
 class IncompleteStackError(RuntimeError):
     """Raised when ``local_dir`` is missing a required schema file (Fix 6).
 
-    A missing SIS file (schools/students/teachers/staff/sections/
-    enrollments.csv) uploaded as a partial stack reads to Clever exactly like
-    every one of that file's rows was deleted -- the same mass-deletion
-    false signal the guardrail (``guardrail.py``) exists to catch on the
-    content side, but here on the transport side, before the guardrail ever
-    runs. Never caught and downgraded -- same posture as ``SafetyViolation``.
+    A missing SIS file (schools/students/teachers/sections/enrollments.csv --
+    the five Clever's own SFTP spec says must always be uploaded together)
+    reads to Clever exactly like every one of that file's rows was deleted --
+    the same mass-deletion false signal the guardrail (``guardrail.py``)
+    exists to catch on the content side, but here on the transport side,
+    before the guardrail ever runs. Never caught and downgraded -- same
+    posture as ``SafetyViolation``.
 
-    There is no longer any exception to this rule. Until 2026-08-05 an absent
-    ``contacts.csv`` was tolerated when the in-memory stack agreed it had zero
-    rows, because that file was engine-owned and only written once it had
-    content. Contacts are now rows on students.csv, which is a real SIS export
-    and must always be present, so every file in ``schema.ALL_SPECS`` is
-    unconditionally required.
+    The one exception is ``schema.OPTIONAL_FILES`` (currently just
+    staff.csv), and ONLY when the in-memory ``stack`` agrees it has zero rows
+    for that file's record type -- Clever's own spec does not require
+    staff.csv to exist at all. This is a different exception than the
+    pre-2026-08-05 ``contacts.csv`` one it replaced: that exception existed
+    because this ENGINE owned the file; contacts are gone entirely now, not
+    optional. This one exists because CLEVER'S OWN SPEC says the file is
+    optional -- see ``schema.OPTIONAL_FILES`` for the citation.
     """
 
 
@@ -104,11 +107,17 @@ def _assert_stack_complete(local_dir: Path, stack: CsvStack) -> None:
     success -- see the module-level reproduction in ``IncompleteStackError``.
     """
 
-    missing = [
-        spec.filename
-        for spec in schema.ALL_SPECS
-        if not (local_dir / spec.filename).exists()
-    ]
+    counts = stack.counts()
+    missing: list[str] = []
+    for spec in schema.ALL_SPECS:
+        if (local_dir / spec.filename).exists():
+            continue
+        if spec.filename in schema.OPTIONAL_FILES and counts.get(spec.record_type, 0) == 0:
+            # Legitimate per Clever's own spec, not this engine's doing -- see
+            # schema.OPTIONAL_FILES. Only skipped when the in-memory stack
+            # agrees there is genuinely nothing of this type to upload.
+            continue
+        missing.append(spec.filename)
 
     if missing:
         raise IncompleteStackError(
@@ -116,8 +125,8 @@ def _assert_stack_complete(local_dir: Path, stack: CsvStack) -> None:
             "or push a partial stack -- Clever would read each missing file's "
             "absence as every one of its rows having been deleted. If a file "
             "legitimately has zero rows, it must still exist on disk with just a "
-            "header row. There are no exceptions to this: every file in "
-            "schema.ALL_SPECS is a real SIS export."
+            "header row, UNLESS it's one of schema.OPTIONAL_FILES and the stack "
+            "agrees it has zero rows of that type."
         )
 
 

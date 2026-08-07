@@ -108,7 +108,11 @@ class CsvStack:
         is ignored on load and disappears on the next ``save``, since save
         promotes a freshly staged directory containing only ``ALL_SPECS``.
 
-        Every file is a real SIS export and must be read exactly as
+        ``schema.OPTIONAL_FILES`` (currently just staff.csv) may legitimately
+        be absent, per Clever's own SFTP spec rather than anything this
+        engine owns -- an absent optional file loads as zero rows.
+
+        Every other file is a real SIS export and must be read exactly as
         Clever produced it: CRLF line endings, utf-8, no quoting. Passing
         ``newline=""`` to ``open`` is required so Python's csv module -- not
         universal-newline translation -- is the thing that decides what a
@@ -121,11 +125,12 @@ class CsvStack:
 
         for spec in schema.ALL_SPECS:
             path = directory / spec.filename
-            # Every file in ALL_SPECS is a real SIS export and must exist. The
-            # "engine-owned file may be absent" escape hatch that used to sit
-            # here was only ever for contacts.csv, which no longer exists, and
-            # keeping it would contradict sftp_push._assert_stack_complete --
-            # which now requires every one of these files unconditionally.
+            if spec.filename in schema.OPTIONAL_FILES and not path.exists():
+                # Per Clever's own spec, not an engine-owned exception -- see
+                # schema.OPTIONAL_FILES. A real export may simply not have
+                # this file (e.g. a district with no staff records at all).
+                tables[spec.filename] = []
+                continue
             with open(path, "r", encoding=schema.ENCODING, newline="") as fh:
                 reader = csv.DictReader(fh)
                 fieldnames = reader.fieldnames or []
@@ -231,13 +236,16 @@ class CsvStack:
         try:
             for spec in schema.ALL_SPECS:
                 rows = self._tables.get(spec.filename, [])
-                # Always write the file, even with zero rows -- a header-only
-                # CSV is correct and pushable, whereas omitting the file
-                # entirely reads to Clever as every one of its rows being
-                # deleted, and would be rejected outright by
-                # sftp_push._assert_stack_complete. The old skip-if-empty
-                # branch here applied only to contacts.csv, which no longer
-                # exists.
+                if spec.filename in schema.OPTIONAL_FILES and not rows:
+                    # Per Clever's own spec, staff.csv need not exist at all
+                    # for a district with no staff records; skip rather than
+                    # write a header-only file that only exists because this
+                    # engine happened to touch the directory once. Every
+                    # non-optional file is always written, even with zero
+                    # rows -- omitting one of THOSE reads to Clever as every
+                    # row having been deleted, and would be rejected outright
+                    # by sftp_push._assert_stack_complete.
+                    continue
                 staged_path = staging / spec.filename
                 with open(staged_path, "w", encoding=schema.ENCODING, newline="") as fh:
                     writer = csv.DictWriter(
