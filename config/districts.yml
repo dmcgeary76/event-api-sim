@@ -34,14 +34,11 @@ districts:
     # accepted as "present in the data" (that used to be the whole check).
     data_fingerprint: "tulsaschools-replica.org"
 
-    # NOT YET VERIFIED. Secure Sync + district-app token eventing has NOT been
-    # confirmed active for this district (project brief §9). Do not flip this
-    # to true until that is explicitly confirmed in the Clever dashboard --
-    # see docs/RUNBOOK.md's "Pre-go-live checklist". Leaving this false is the
-    # safe default; the engine still runs with it false (it's a warning, not a
-    # gate), but a partner will see nothing on the Events API until this is
-    # actually turned on and confirmed, however correct the CSV edits are.
-    eventing_verified: false
+    # VERIFIED 2026-08-07. David confirmed the "Enable events" toggle is ON
+    # in the Clever dashboard for this district (project brief §9) -- Secure
+    # Sync eventing is active, so CSV diffs this engine produces will actually
+    # emit Events API records. See docs/RUNBOOK.md's "Pre-go-live checklist".
+    eventing_verified: true
 
     # District's own local timezone. Cadence (which weekday bucket runs
     # "today") is resolved in THIS timezone, not the host machine's or UTC's --

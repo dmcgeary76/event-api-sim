@@ -533,10 +533,10 @@ but all four should be understood before a first live push:
    exists. If no such safe candidate exists in another school this run
    (only possible in a school with exactly one teacher), the removal is
    skipped for that run rather than forced through.
-2. **`eventing_verified` is still `false`.** Secure Sync / district-app
-   token eventing has not been confirmed active for this district (brief
-   §9). Must be verified in the Clever dashboard before any partner-facing
-   use.
+2. **~~`eventing_verified` is still `false`.~~ RESOLVED 2026-08-07.** David
+   confirmed the "Enable events" toggle is ON in the Clever dashboard for
+   this district (brief §9) -- Secure Sync eventing is active.
+   `config/districts.yml`'s `eventing_verified` is now `true`.
 3. **paramiko is untested in this build.** See the test-suite note above --
    real SFTP transport behaviour is reviewed, not executed.
 4. **Contacts are never scale-checked, because their baseline is zero.**

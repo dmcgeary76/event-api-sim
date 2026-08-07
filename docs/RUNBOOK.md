@@ -123,15 +123,14 @@ finished first.
 
 Before pointing this at a partner-facing sandbox for real:
 
-1. **Confirm Secure Sync + district-app token eventing is active** for the
-   target district in the Clever dashboard, and flip `eventing_verified:
-   true` in `config/districts.yml`. This is brief §9's open item — the build
-   left it `false` by default and logs a warning on every config load and
-   every run while it's `false` ("Secure Sync / district-app token eventing
-   has not been confirmed... Proceeding anyway"). The engine will still run
-   with `eventing_verified: false` — it is a warning, not a gate — but a
-   partner will see nothing on the Events API if this hasn't actually been
-   turned on, no matter how correct the CSV edits are.
+1. **Resolved, no longer a pre-go-live blocker: Secure Sync eventing is
+   confirmed active.** David confirmed the "Enable events" toggle is ON in
+   the Clever dashboard for this district on 2026-08-07, and
+   `config/districts.yml`'s `eventing_verified` is now `true` — brief §9's
+   open item is closed. The build previously left it `false` by default and
+   logged a warning on every config load and run while it was `false`
+   ("Secure Sync / district-app token eventing has not been confirmed...
+   Proceeding anyway"); that warning no longer fires for this district.
 2. **Confirm the SFTP account is a sandbox account**, not shared/production
    infrastructure repurposed. The safety gates (host/username allowlist,
    data fingerprint presence + strength, scale sanity) protect against the
@@ -168,9 +167,8 @@ Before pointing this at a partner-facing sandbox for real:
 
 Sequence these in order — do not skip ahead, and do not combine steps:
 
-1. **Confirm eventing** (checklist item 1 above) — flip `eventing_verified:
-   true` only after Secure Sync / district-app token eventing is confirmed
-   active in the Clever dashboard.
+1. **Eventing is confirmed** (checklist item 1 above) — `eventing_verified:
+   true` is already set for this district as of 2026-08-07.
 2. **Do the first dry `seed` and read its numbers before any live seeding.**
    The contact CSV shape itself is settled (checklist item 5), so what matters
    now is that the row arithmetic behaves: `students.csv` row count should grow
@@ -555,9 +553,9 @@ four matter before treating this as production-ready for a partner:
    first so no removal can ever leave a dangling `Teacher id`/`Teacher 2 id`
    reference. Used the corrected enum's existing `USERS_DELETED` (with
    `EventSubject.TEACHER`) -- no new `EventType` was needed.
-2. **`eventing_verified` is still `false`** in `config/districts.yml` --
-   Secure Sync / district-app token eventing has not been confirmed for
-   this district. Must be verified before partner-facing use.
+2. **~~`eventing_verified` is still `false`.~~ RESOLVED 2026-08-07.** David
+   confirmed the "Enable events" toggle is ON in the Clever dashboard for
+   this district. `config/districts.yml` now has `eventing_verified: true`.
 3. **`paramiko` behaviour is code-reviewed, not executed.** It isn't
    installable in this build environment (no PyPI access), so the 2
    host-key-policy tests skip. Watch the first live push closely for

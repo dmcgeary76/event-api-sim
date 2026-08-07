@@ -43,7 +43,9 @@ def test_fallback_parser_parses_real_districts_yml():
     assert entry["label"] == "Tulsa Replica Sandbox"
     assert entry["enabled"] is True
     assert entry["data_fingerprint"] == "tulsaschools-replica.org"
-    assert entry["eventing_verified"] is False
+    # Confirmed 2026-08-07: David verified the "Enable events" toggle is ON
+    # in the Clever dashboard for this district.
+    assert entry["eventing_verified"] is True
 
     sftp = entry["sftp"]
     assert sftp["host"] == "sftp.clever.com"
@@ -75,7 +77,9 @@ def test_load_config_reads_real_file_end_to_end():
     assert district.sftp.host == "sftp.clever.com"
     assert district.sftp.port == 22
     assert district.data_fingerprint == "tulsaschools-replica.org"
-    assert district.eventing_verified is False
+    # Confirmed 2026-08-07: David verified the "Enable events" toggle is ON
+    # in the Clever dashboard for this district.
+    assert district.eventing_verified is True
     assert engine_config.allowlist() == frozenset({"steadfast-backpack-8880"})
     assert engine_config.enabled_districts() == (district,)
 

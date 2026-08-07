@@ -4,6 +4,21 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.3.1] - 2026-08-07
+
+### Resolved
+
+- **`eventing_verified` is now `true` for the Tulsa replica sandbox.**
+  David confirmed the "Enable events" toggle is ON in the Clever dashboard
+  for this district (project brief §9's long-open item). `config/
+  districts.yml`'s `eventing_verified` flipped from `false` to `true`, so
+  the "Secure Sync / district-app token eventing has not been confirmed...
+  Proceeding anyway" warning no longer fires on config load or on every run
+  for this district. This was the last of the two hard "must verify before
+  partner-facing use" items carried in the README/RUNBOOK Known limitations
+  sections since the initial release; the other (real `paramiko` transport
+  being code-reviewed but not executed in this build sandbox) remains open.
+
 ## [0.3.0] - 2026-08-07
 
 ### Added
